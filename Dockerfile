@@ -1,6 +1,3 @@
-# ============================================
-# Stage 1: تجهيز الأدوات
-# ============================================
 FROM alpine:3.20 AS tools
 
 RUN apk add --no-cache \
@@ -11,15 +8,11 @@ RUN apk add --no-cache \
                stat du sort tail awk xargs find \
                wc cut tr gzip tar cat date sleep \
                mkdir rm ls grep sed head touch \
-               cp mv basename; do \
+               cp mv basename expr; do \
       p="$(which $cmd 2>/dev/null)" && \
         [ -f "$p" ] && cp "$p" /toolbox/ || true; \
-    done && \
-    ls -la /toolbox/
+    done
 
-# ============================================
-# Stage 2: n8n + الأدوات
-# ============================================
 FROM docker.n8n.io/n8nio/n8n:2.3.6
 
 USER root
