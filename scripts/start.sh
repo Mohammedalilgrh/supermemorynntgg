@@ -2,83 +2,83 @@
 set -eu
 umask 077
 
-MONITOR_INTERVAL="${MONITOR_INTERVAL:-45}"
 N8N_DIR="${N8N_DIR:-/home/node/.n8n}"
 WORK="${WORK:-/backup-data}"
-INIT_FLAG="$WORK/.initialized"
+MONITOR_INTERVAL="${MONITOR_INTERVAL:-30}"
 
-mkdir -p "$N8N_DIR" "$WORK"
+mkdir -p "$N8N_DIR" "$WORK" "$WORK/history"
 export HOME="/home/node"
+
+: "${TG_BOT_TOKEN:?Set TG_BOT_TOKEN}"
+: "${TG_CHAT_ID:?Set TG_CHAT_ID}"
+: "${TG_ADMIN_ID:?Set TG_ADMIN_ID}"
+
+TG="https://api.telegram.org/bot${TG_BOT_TOKEN}"
+
+tg_msg() {
+  curl -sS -X POST "${TG}/sendMessage" \
+    -d "chat_id=${TG_ADMIN_ID}" \
+    -d "parse_mode=HTML" \
+    -d "text=$1" >/dev/null 2>&1 || true
+}
 
 echo ""
 echo "╔══════════════════════════════════════════════╗"
-echo "║  n8n + Telegram Backup System v3.0           ║"
-echo "║  $(date -u)                   ║"
+echo "║  n8n + Telegram Smart Backup v4.0            ║"
 echo "╚══════════════════════════════════════════════╝"
 echo ""
 
 # ── فحص الأدوات ──
-echo "🔎 فحص الأدوات:"
 ALL_OK=true
 for cmd in curl jq sqlite3 tar gzip split sha256sum \
-           stat du sort awk xargs find cut tr cat grep sed; do
-  if command -v "$cmd" >/dev/null 2>&1; then
-    printf "  ✅ %s\n" "$cmd"
-  else
-    printf "  ❌ %s\n" "$cmd"
-    ALL_OK=false
-  fi
+           stat du sort awk xargs find cut tr; do
+  command -v "$cmd" >/dev/null 2>&1 || { echo "❌ $cmd"; ALL_OK=false; }
 done
+[ "$ALL_OK" = "true" ] || exit 1
+echo "✅ كل الأدوات موجودة"
 
-[ "$ALL_OK" = "true" ] || { echo "❌ أدوات مفقودة"; exit 1; }
-echo ""
-
-# ── فحص Telegram ──
-echo "🔎 فحص اتصال Telegram:"
-: "${TG_BOT_TOKEN:?Set TG_BOT_TOKEN}"
-: "${TG_CHAT_ID:?Set TG_CHAT_ID}"
-
-TG_TEST=$(curl -sS "https://api.telegram.org/bot${TG_BOT_TOKEN}/getMe" \
-  | jq -r '.ok // "false"')
-
-if [ "$TG_TEST" = "true" ]; then
-  BOT_NAME=$(curl -sS "https://api.telegram.org/bot${TG_BOT_TOKEN}/getMe" \
-    | jq -r '.result.username // "unknown"')
-  echo "  ✅ البوت متصل: @${BOT_NAME}"
+# ── فحص البوت ──
+BOT_OK=$(curl -sS "${TG}/getMe" | jq -r '.ok // "false"')
+BOT_NAME=$(curl -sS "${TG}/getMe" | jq -r '.result.username // "?"')
+if [ "$BOT_OK" = "true" ]; then
+  echo "✅ البوت: @${BOT_NAME}"
 else
-  echo "  ❌ فشل الاتصال بالبوت"
+  echo "❌ فشل الاتصال بالبوت"
   exit 1
 fi
-echo ""
 
 # ── الاسترجاع ──
 if [ ! -s "$N8N_DIR/database.sqlite" ]; then
-  echo "📦 لا توجد قاعدة بيانات محلية"
-  echo "🔄 البحث عن آخر باك أب في Telegram..."
   echo ""
+  echo "📦 لا توجد داتابيس - جاري الاسترجاع..."
+  tg_msg "🔄 <b>جاري استرجاع البيانات...</b>"
 
-  restore_ok=false
   if sh /scripts/restore.sh 2>&1; then
-    [ -s "$N8N_DIR/database.sqlite" ] && restore_ok=true
-  fi
-
-  if [ "$restore_ok" = "true" ]; then
-    echo "✅ تم الاسترجاع بنجاح!"
+    if [ -s "$N8N_DIR/database.sqlite" ]; then
+      echo "✅ تم الاسترجاع!"
+      tg_msg "✅ <b>تم استرجاع البيانات بنجاح!</b>"
+    else
+      echo "🆕 أول تشغيل"
+      tg_msg "🆕 <b>أول تشغيل - لا توجد نسخة سابقة</b>"
+    fi
   else
-    echo "📭 لا توجد نسخة سابقة - أول تشغيل"
+    echo "🆕 أول تشغيل"
   fi
-
-  echo "init:$(date -u)" > "$INIT_FLAG"
 else
-  echo "✅ قاعدة البيانات موجودة"
-  [ -f "$INIT_FLAG" ] || echo "init:$(date -u)" > "$INIT_FLAG"
+  echo "✅ الداتابيس موجودة"
 fi
 echo ""
+
+# ── البوت التفاعلي ──
+(
+  sleep 10
+  echo "[bot] 🤖 البوت التفاعلي شغّال"
+  sh /scripts/bot.sh 2>&1 | sed 's/^/[bot] /' &
+) &
 
 # ── Keep-Alive ──
 (
   sleep 60
-  echo "[keepalive] 🟢 شغّال"
   while true; do
     curl -sS -o /dev/null \
       "http://localhost:${N8N_PORT:-5678}/healthz" 2>/dev/null || true
@@ -88,17 +88,13 @@ echo ""
 
 # ── مراقب الباك أب ──
 (
-  echo "[backup] ⏳ انتظار 60 ثانية..."
-  sleep 60
-
-  # باك أب فوري
+  sleep 45
   if [ -s "$N8N_DIR/database.sqlite" ]; then
     echo "[backup] 🔥 باك أب فوري"
-    rm -f "$WORK/.backup_state" 2>/dev/null || true
+    rm -f "$WORK/.backup_state"
     sh /scripts/backup.sh 2>&1 | sed 's/^/[backup] /' || true
   fi
 
-  echo "[backup] 🔄 مراقبة كل ${MONITOR_INTERVAL}s"
   while true; do
     sleep "$MONITOR_INTERVAL"
     [ -s "$N8N_DIR/database.sqlite" ] && \
@@ -106,6 +102,8 @@ echo ""
   done
 ) &
 
+tg_msg "🚀 <b>n8n شغّال الآن!</b>
+🤖 أرسل /start للتحكم"
+
 echo "🚀 تشغيل n8n..."
-echo ""
 exec n8n start
