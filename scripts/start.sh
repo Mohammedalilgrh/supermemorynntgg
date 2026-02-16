@@ -52,13 +52,16 @@ done ) &
 
 # باك أب دوري
 ( sleep 30
-  [ -s "$N8N_DIR/database.sqlite" ] && {
+  if [ -s "$N8N_DIR/database.sqlite" ]; then
     rm -f "$WORK/.backup_state"
     sh /scripts/backup.sh 2>&1 | sed 's/^/[backup] /' || true
-  }
-  while true; do sleep "$MONITOR"
-    [ -s "$N8N_DIR/database.sqlite" ] && \
+  fi
+  while true; do
+    sleep "$MONITOR"
+    if [ -s "$N8N_DIR/database.sqlite" ]; then
       sh /scripts/backup.sh 2>&1 | sed 's/^/[backup] /' || true
-  done ) &
+    fi
+  done
+) &
 
 wait $N8N_PID
