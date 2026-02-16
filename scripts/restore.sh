@@ -2,151 +2,150 @@
 set -eu
 umask 077
 
-: "${TG_BOT_TOKEN:?}" "${TG_CHAT_ID:?}"
+: "${TG_BOT_TOKEN:?}"
+: "${TG_CHAT_ID:?}"
 
 N8N_DIR="${N8N_DIR:-/home/node/.n8n}"
 WORK="${WORK:-/backup-data}"
 HIST="$WORK/history"
-TG="https://api.telegram.org/bot${TG_BOT_TOKEN}"
-TMP="/tmp/restore_$$"
 
-trap 'rm -rf "$TMP"' EXIT
+TG="https://api.telegram.org/bot${TG_BOT_TOKEN}"
+TMP="/tmp/restore-$$"
+
+trap 'rm -rf "$TMP" 2>/dev/null || true' EXIT
 mkdir -p "$N8N_DIR" "$WORK" "$HIST" "$TMP"
 
 [ -s "$N8N_DIR/database.sqlite" ] && { echo "✅ DB موجودة"; exit 0; }
 
-echo "🔍 البحث عن نسخة احتياطية..."
+echo "=== 🔍 البحث عن آخر باك أب ==="
 
-# ══════════════════════════════
-# تحميل ملف من تلكرام
-# ══════════════════════════════
-
-download_file() {
-  _fid="$1"
-  _output="$2"
-
-  _path=$(curl -sS "${TG}/getFile?file_id=${_fid}" 2>/dev/null \
-    | jq -r '.result.file_path // empty')
-
-  [ -z "$_path" ] && return 1
-
-  curl -sS -o "$_output" \
-    "https://api.telegram.org/file/bot${TG_BOT_TOKEN}/${_path}" 2>/dev/null
-
-  [ -s "$_output" ]
+# ── دالة تحميل ملف ──
+dl_file() {
+  _fid="$1"; _out="$2"
+  _path=$(curl -sS "${TG}/getFile?file_id=${_fid}" \
+    | jq -r '.result.file_path // empty' 2>/dev/null)
+  [ -n "$_path" ] || return 1
+  curl -sS -o "$_out" \
+    "https://api.telegram.org/file/bot${TG_BOT_TOKEN}/${_path}"
+  [ -s "$_out" ]
 }
 
-# ══════════════════════════════
-# استرجاع من manifest
-# ══════════════════════════════
-
+# ── دالة الاسترجاع من مانيفست ──
 restore_from_manifest() {
-  _manifest="$1"
-  _bid=$(jq -r '.id // "?"' "$_manifest")
-  
-  echo "  📋 استرجاع: $_bid"
+  _mfile="$1"
+  _bid=$(jq -r '.id // "?"' "$_mfile" 2>/dev/null)
+  echo "  📋 باك أب: $_bid"
 
-  # تحميل الملفات
-  jq -c '.files[]' "$_manifest" 2>/dev/null | while read -r obj; do
-    _fid=$(echo "$obj" | jq -r '.file_id // .f // empty')
-    _fname=$(echo "$obj" | jq -r '.name // .n // empty')
-    _mid=$(echo "$obj" | jq -r '.msg_id // .m // 0')
+  _rdir="$TMP/data"
+  rm -rf "$_rdir"; mkdir -p "$_rdir"
 
-    [ -z "$_fid" ] || [ -z "$_fname" ] && continue
+  _all_ok=true
+  jq -r '.files[] | "\(.file_id)|\(.name)"' "$_mfile" 2>/dev/null | \
+  while IFS='|' read -r _fid _fn; do
+    [ -n "$_fid" ] || continue
+    echo "    📥 $_fn..."
 
-    echo "    📥 $_fname"
+    _try=0
+    while [ "$_try" -lt 3 ]; do
+      if dl_file "$_fid" "$_rdir/$_fn"; then
+        echo "      ✅"
+        break
+      fi
+      _try=$((_try + 1))
+      sleep 2
+    done
 
-    # طريقة 1: file_id مباشرة
-    if download_file "$_fid" "$TMP/$_fname" 2>/dev/null; then
-      continue
-    fi
-
-    # طريقة 2: forward الرسالة
-    if [ "$_mid" != "0" ]; then
-      _fwd=$(curl -sS -X POST "${TG}/forwardMessage" \
-        -d "chat_id=${TG_CHAT_ID}" \
-        -d "from_chat_id=${TG_CHAT_ID}" \
-        -d "message_id=${_mid}" 2>/dev/null || true)
-
-      _new_fid=$(echo "$_fwd" | jq -r '.result.document.file_id // empty')
-      _fwd_mid=$(echo "$_fwd" | jq -r '.result.message_id // empty')
-
-      # حذف الفورورد
-      [ -n "$_fwd_mid" ] && curl -sS -X POST "${TG}/deleteMessage" \
-        -d "chat_id=${TG_CHAT_ID}" -d "message_id=${_fwd_mid}" >/dev/null 2>&1 || true
-
-      [ -n "$_new_fid" ] && download_file "$_new_fid" "$TMP/$_fname" 2>/dev/null
-    fi
-
+    [ -s "$_rdir/$_fn" ] || touch "$_rdir/.failed"
     sleep 1
   done
 
+  [ ! -f "$_rdir/.failed" ] || { echo "  ❌ فشل التحميل"; return 1; }
+
   # استرجاع DB
-  if [ -f "$TMP/db.sql.gz" ]; then
-    gzip -dc "$TMP/db.sql.gz" | sqlite3 "$N8N_DIR/database.sqlite"
-  elif ls "$TMP"/db.sql.gz.part_* >/dev/null 2>&1; then
-    cat "$TMP"/db.sql.gz.part_* | gzip -dc | sqlite3 "$N8N_DIR/database.sqlite"
+  if ls "$_rdir"/db.sql.gz.part_* >/dev/null 2>&1; then
+    cat "$_rdir"/db.sql.gz.part_* | gzip -dc | sqlite3 "$N8N_DIR/database.sqlite"
+  elif [ -f "$_rdir/db.sql.gz" ]; then
+    gzip -dc "$_rdir/db.sql.gz" | sqlite3 "$N8N_DIR/database.sqlite"
   else
-    echo "  ❌ لا توجد DB"
+    echo "  ❌ لا ملفات DB"
     return 1
   fi
 
-  # فحص
-  _tables=$(sqlite3 "$N8N_DIR/database.sqlite" \
-    "SELECT count(*) FROM sqlite_master WHERE type='table';" 2>/dev/null || echo 0)
-
-  [ "$_tables" -eq 0 ] && {
-    rm -f "$N8N_DIR/database.sqlite"
+  if [ ! -s "$N8N_DIR/database.sqlite" ]; then
     echo "  ❌ DB فارغة"
+    rm -f "$N8N_DIR/database.sqlite"
     return 1
-  }
+  fi
 
-  echo "  ✅ $_tables جدول"
+  _tc=$(sqlite3 "$N8N_DIR/database.sqlite" \
+    "SELECT count(*) FROM sqlite_master WHERE type='table';" 2>/dev/null || echo 0)
+  [ "$_tc" -gt 0 ] || { rm -f "$N8N_DIR/database.sqlite"; return 1; }
+  echo "  ✅ $_tc جدول"
 
   # استرجاع الملفات
-  if [ -f "$TMP/files.tar.gz" ]; then
-    gzip -dc "$TMP/files.tar.gz" | tar -C "$N8N_DIR" -xf - 2>/dev/null || true
-  elif ls "$TMP"/files.tar.gz.part_* >/dev/null 2>&1; then
-    cat "$TMP"/files.tar.gz.part_* | gzip -dc | tar -C "$N8N_DIR" -xf - 2>/dev/null || true
+  if ls "$_rdir"/files.tar.gz.part_* >/dev/null 2>&1; then
+    cat "$_rdir"/files.tar.gz.part_* | gzip -dc | tar -C "$N8N_DIR" -xf - 2>/dev/null || true
+  elif [ -f "$_rdir/files.tar.gz" ]; then
+    gzip -dc "$_rdir/files.tar.gz" | tar -C "$N8N_DIR" -xf - 2>/dev/null || true
   fi
 
-  cp "$_manifest" "$HIST/${_bid}.json" 2>/dev/null || true
-  echo "  🎉 تم بنجاح!"
+  # حفظ المانيفست بالتاريخ
+  cp "$_mfile" "$HIST/${_bid}.json" 2>/dev/null || true
+
+  rm -rf "$_rdir"
+  echo "  🎉 استرجاع ناجح!"
   return 0
 }
 
-# ══════════════════════════════
-# البحث عن manifest
-# ══════════════════════════════
+# ════════════════════════════════
+# الطريقة 1: الرسالة المثبّتة
+# ════════════════════════════════
+echo ""
+echo "🔍 [1/2] البحث عن رسالة مثبّتة..."
 
-# **الطريقة الجديدة**: نبحث في آخر 100 message
-# (يشتغل إذا البوت admin بالقناة أو الرسائل forwarded)
+PINNED=$(curl -sS "${TG}/getChat?chat_id=${TG_CHAT_ID}" 2>/dev/null)
+_pin_fid=$(echo "$PINNED" | jq -r '.result.pinned_message.document.file_id // empty' 2>/dev/null)
+_pin_cap=$(echo "$PINNED" | jq -r '.result.pinned_message.caption // ""' 2>/dev/null)
 
-echo "🔍 البحث في الرسائل..."
-
-# نجرب نحصل آخر 100 update_id
-for offset in -1 -50 -100; do
-  MSGS=$(curl -sS "${TG}/getUpdates?offset=${offset}&limit=100" 2>/dev/null || true)
-  
-  # نبحث عن manifest
-  _fid=$(echo "$MSGS" | jq -r '
-    [.result[]? 
-      | select(
-          (.message.document != null or .channel_post.document != null)
-          and ((.message.caption // .channel_post.caption // "") | contains("n8n_manifest"))
-        )
-    ] 
-    | sort_by(-(.message.date // .channel_post.date // 0))
-    | .[0].message.document.file_id // .[0].channel_post.document.file_id // empty
-  ' 2>/dev/null)
-
-  if [ -n "$_fid" ]; then
-    echo "  ✅ لقيت manifest!"
-    if download_file "$_fid" "$TMP/manifest.json"; then
-      restore_from_manifest "$TMP/manifest.json" && exit 0
+if [ -n "$_pin_fid" ] && echo "$_pin_cap" | grep -q "n8n_manifest"; then
+  echo "  📌 لقينا مانيفست مثبّت!"
+  if dl_file "$_pin_fid" "$TMP/manifest.json"; then
+    if restore_from_manifest "$TMP/manifest.json"; then
+      exit 0
     fi
   fi
-done
+fi
+echo "  📭 لا يوجد"
 
-echo "📭 لا توجد نسخة"
+# ════════════════════════════════
+# الطريقة 2: البحث في الرسائل
+# ════════════════════════════════
+echo ""
+echo "🔍 [2/2] البحث في آخر الرسائل..."
+
+# نبحث عن رسائل فيها n8n_manifest
+# نستخدم search في القناة
+_search_resp=$(curl -sS "${TG}/getUpdates?offset=-50&limit=50" 2>/dev/null || true)
+
+if [ -n "$_search_resp" ]; then
+  # نبحث عن أي document فيه n8n_manifest
+  _found_fid=$(echo "$_search_resp" | jq -r '
+    [.result[] |
+      select(.channel_post.document != null) |
+      select(.channel_post.caption // "" | contains("n8n_manifest"))
+    ] | sort_by(-.channel_post.date) | .[0].channel_post.document.file_id // empty
+  ' 2>/dev/null || true)
+
+  if [ -n "$_found_fid" ]; then
+    echo "  📋 لقينا مانيفست!"
+    if dl_file "$_found_fid" "$TMP/manifest2.json"; then
+      if restore_from_manifest "$TMP/manifest2.json"; then
+        exit 0
+      fi
+    fi
+  fi
+fi
+
+echo ""
+echo "📭 لا توجد نسخة احتياطية"
 exit 1
