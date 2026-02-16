@@ -12,68 +12,53 @@ export HOME="/home/node"
 : "${TG_BOT_TOKEN:?}" "${TG_CHAT_ID:?}" "${TG_ADMIN_ID:?}"
 TG="https://api.telegram.org/bot${TG_BOT_TOKEN}"
 
-# ── فحص الأدوات ──
+# فحص الأدوات
 for cmd in curl jq sqlite3 tar gzip split stat du awk find cut tr; do
   command -v "$cmd" >/dev/null 2>&1 || { echo "❌ مو موجود: $cmd"; exit 1; }
 done
 echo "✅ كل الأدوات موجودة"
 
-# ── استرجاع (قبل n8n) ──
+# استرجاع
 if [ ! -s "$N8N_DIR/database.sqlite" ]; then
   echo "📦 محاولة استرجاع..."
   sh /scripts/restore.sh 2>&1 || true
-  if [ -s "$N8N_DIR/database.sqlite" ]; then
-    echo "✅ تم الاسترجاع"
-  else
-    echo "🆕 أول تشغيل - بدون نسخة سابقة"
-  fi
+  [ -s "$N8N_DIR/database.sqlite" ] && echo "✅ تم الاسترجاع" || echo "🆕 أول تشغيل"
 fi
 
-# ── تشغيل n8n ──
+# تشغيل n8n
 echo "🚀 تشغيل n8n..."
 n8n start &
 N8N_PID=$!
 
-# انتظار البورت
 _wait=0
 while [ "$_wait" -lt 45 ]; do
-  if curl -so /dev/null "http://localhost:${N8N_PORT:-5678}/healthz" 2>/dev/null; then
-    echo "✅ n8n جاهز!"
-    break
-  fi
-  _wait=$((_wait + 1))
-  sleep 2
+  curl -so /dev/null "http://localhost:${N8N_PORT:-5678}/healthz" 2>/dev/null && break
+  _wait=$((_wait + 1)); sleep 2
 done
+echo "✅ n8n جاهز!"
 
-# ── إشعار ──
+# إشعار
 curl -sS -X POST "${TG}/sendMessage" \
-  -d "chat_id=${TG_ADMIN_ID}" \
-  -d "parse_mode=HTML" \
-  -d "text=🚀 <b>n8n شغّال!</b>
-أرسل /start للتحكم" >/dev/null 2>&1 || true
+  -d "chat_id=${TG_ADMIN_ID}" -d "parse_mode=HTML" \
+  -d "text=🚀 <b>n8n شغّال!</b> أرسل /start" >/dev/null 2>&1 || true
 
-# ── البوت ──
+# البوت
 ( sleep 5; sh /scripts/bot.sh 2>&1 | sed 's/^/[bot] /' ) &
 
-# ── Keep-Alive ──
-( while true; do
-    sleep 300
-    curl -so /dev/null "http://localhost:${N8N_PORT:-5678}/healthz" 2>/dev/null || true
-  done ) &
+# Keep-Alive
+( while true; do sleep 300
+  curl -so /dev/null "http://localhost:${N8N_PORT:-5678}/healthz" 2>/dev/null || true
+done ) &
 
-# ── باك أب دوري ──
+# باك أب دوري
 ( sleep 30
-  # أول باك أب
-  if [ -s "$N8N_DIR/database.sqlite" ]; then
+  [ -s "$N8N_DIR/database.sqlite" ] && {
     rm -f "$WORK/.backup_state"
     sh /scripts/backup.sh 2>&1 | sed 's/^/[backup] /' || true
-  fi
-  # دوري
-  while true; do
-    sleep "$MONITOR"
-    if [ -s "$N8N_DIR/database.sqlite" ]; then
+  }
+  while true; do sleep "$MONITOR"
+    [ -s "$N8N_DIR/database.sqlite" ] && \
       sh /scripts/backup.sh 2>&1 | sed 's/^/[backup] /' || true
-    fi
   done ) &
 
 wait $N8N_PID
