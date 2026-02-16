@@ -14,12 +14,14 @@ TMP="/tmp/restore_$$"
 trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$N8N_DIR" "$WORK" "$HIST" "$TMP"
 
-# لو الداتابيس موجودة = لا تسترجع
 [ -s "$N8N_DIR/database.sqlite" ] && { echo "✅ الداتابيس موجودة"; exit 0; }
 
 echo "🔍 البحث عن نسخة احتياطية..."
 
-# ── تحميل ملف من تلكرام ──
+# ══════════════════════════════
+# تحميل ملف من تلكرام
+# ══════════════════════════════
+
 download_file() {
   _fid="$1"
   _output="$2"
@@ -35,20 +37,25 @@ download_file() {
   [ -s "$_output" ]
 }
 
-# ── تحميل ذكي (يدعم تغيير البوت) ──
+# ══════════════════════════════
+# تحميل ذكي (يدعم تغيير البوت)
+# ══════════════════════════════
+
 smart_download() {
   _fid="$1"
   _mid="$2"
   _output="$3"
 
-  # محاولة 1: بالـ file_id مباشرة
-  if download_file "$_fid" "$_output" 2>/dev/null; then
-    return 0
+  # محاولة 1: file_id مباشرة
+  if [ -n "$_fid" ] && [ "$_fid" != "null" ]; then
+    if download_file "$_fid" "$_output" 2>/dev/null; then
+      return 0
+    fi
   fi
 
   echo "      ⚠️ file_id ما اشتغل، نجرب message_id..."
 
-  # محاولة 2: forward الرسالة → file_id جديد
+  # محاولة 2: forward الرسالة
   if [ -n "$_mid" ] && [ "$_mid" != "null" ] && [ "$_mid" != "0" ]; then
     _fwd=$(curl -sS -X POST "${TG}/forwardMessage" \
       -d "chat_id=${TG_CHAT_ID}" \
@@ -74,10 +81,44 @@ smart_download() {
   return 1
 }
 
-# ── استرجاع من مانيفست ──
+# ══════════════════════════════
+# قراءة المانيفست (القديم والجديد)
+# ══════════════════════════════
+
+# يدعم الصيغتين:
+#   الجديد: .file_id .name .message_id
+#   القديم: .f .n .m
+
+read_manifest_files() {
+  _mfile="$1"
+
+  # نفحص الصيغة
+  _has_file_id=$(jq -r '.files[0].file_id // empty' "$_mfile" 2>/dev/null)
+  _has_f=$(jq -r '.files[0].f // empty' "$_mfile" 2>/dev/null)
+
+  if [ -n "$_has_file_id" ]; then
+    # الصيغة الجديدة
+    jq -r '.files[] | "\(.file_id // "")|\(.name // "")|\(.message_id // 0)"' "$_mfile" 2>/dev/null
+  elif [ -n "$_has_f" ]; then
+    # الصيغة القديمة
+    jq -r '.files[] | "\(.f // "")|\(.n // "")|\(.m // 0)"' "$_mfile" 2>/dev/null
+  else
+    echo ""
+  fi
+}
+
+read_manifest_id() {
+  _mfile="$1"
+  jq -r '.id // "?"' "$_mfile" 2>/dev/null
+}
+
+# ══════════════════════════════
+# استرجاع من مانيفست
+# ══════════════════════════════
+
 restore_from_manifest() {
   _manifest="$1"
-  _bid=$(jq -r '.id // "?"' "$_manifest" 2>/dev/null)
+  _bid=$(read_manifest_id "$_manifest")
   echo "  📋 استرجاع نسخة: $_bid"
 
   _restore_dir="$TMP/files"
@@ -85,10 +126,11 @@ restore_from_manifest() {
   mkdir -p "$_restore_dir"
 
   # تحميل كل الملفات
-  jq -r '.files[] | "\(.file_id)|\(.name)|\(.message_id // 0)"' \
-    "$_manifest" 2>/dev/null | \
+  read_manifest_files "$_manifest" | \
   while IFS='|' read -r _fid _fname _mid; do
-    [ -n "$_fid" ] || continue
+    [ -n "$_fid" ] && [ "$_fid" != "" ] || continue
+    [ -n "$_fname" ] && [ "$_fname" != "" ] || continue
+
     echo "    📥 $_fname"
 
     _retry=0
@@ -117,21 +159,33 @@ restore_from_manifest() {
     return 1
   fi
 
+  # فحص إذا فيه ملفات
+  _file_count=$(ls "$_restore_dir" 2>/dev/null | wc -l || echo 0)
+  if [ "$_file_count" -eq 0 ]; then
+    echo "  ❌ لا ملفات محمّلة"
+    return 1
+  fi
+
   # ── تجميع واسترجاع DB ──
+  # يدعم الاسمين: db.sql.gz (جديد) و d.gz (قديم)
   if ls "$_restore_dir"/db.sql.gz.part_* >/dev/null 2>&1; then
-    echo "  🔧 تجميع أجزاء الداتابيس..."
-    cat "$_restore_dir"/db.sql.gz.part_* | gzip -dc \
-      | sqlite3 "$N8N_DIR/database.sqlite"
+    echo "  🔧 تجميع أجزاء DB (جديد)..."
+    cat "$_restore_dir"/db.sql.gz.part_* | gzip -dc | sqlite3 "$N8N_DIR/database.sqlite"
   elif [ -f "$_restore_dir/db.sql.gz" ]; then
-    echo "  🔧 استرجاع الداتابيس..."
-    gzip -dc "$_restore_dir/db.sql.gz" \
-      | sqlite3 "$N8N_DIR/database.sqlite"
+    echo "  🔧 استرجاع DB (جديد)..."
+    gzip -dc "$_restore_dir/db.sql.gz" | sqlite3 "$N8N_DIR/database.sqlite"
+  elif ls "$_restore_dir"/d.gz.p* >/dev/null 2>&1; then
+    echo "  🔧 تجميع أجزاء DB (قديم)..."
+    cat "$_restore_dir"/d.gz.p* | gzip -dc | sqlite3 "$N8N_DIR/database.sqlite"
+  elif [ -f "$_restore_dir/d.gz" ]; then
+    echo "  🔧 استرجاع DB (قديم)..."
+    gzip -dc "$_restore_dir/d.gz" | sqlite3 "$N8N_DIR/database.sqlite"
   else
     echo "  ❌ لا توجد داتابيس بالنسخة"
     return 1
   fi
 
-  # فحص الداتابيس
+  # فحص
   if [ ! -s "$N8N_DIR/database.sqlite" ]; then
     echo "  ❌ الداتابيس فارغة"
     rm -f "$N8N_DIR/database.sqlite"
@@ -139,11 +193,10 @@ restore_from_manifest() {
   fi
 
   _tables=$(sqlite3 "$N8N_DIR/database.sqlite" \
-    "SELECT count(*) FROM sqlite_master WHERE type='table';" \
-    2>/dev/null || echo 0)
+    "SELECT count(*) FROM sqlite_master WHERE type='table';" 2>/dev/null || echo 0)
 
   if [ "$_tables" -eq 0 ]; then
-    echo "  ❌ لا جداول بالداتابيس"
+    echo "  ❌ لا جداول"
     rm -f "$N8N_DIR/database.sqlite"
     return 1
   fi
@@ -151,19 +204,18 @@ restore_from_manifest() {
   echo "  ✅ $_tables جدول"
 
   # ── استرجاع الملفات الإضافية ──
+  # يدعم الاسمين: files.tar.gz (جديد) و f.gz (قديم)
   if ls "$_restore_dir"/files.tar.gz.part_* >/dev/null 2>&1; then
-    echo "  🔧 تجميع الملفات..."
-    cat "$_restore_dir"/files.tar.gz.part_* | gzip -dc \
-      | tar -C "$N8N_DIR" -xf - 2>/dev/null || true
+    cat "$_restore_dir"/files.tar.gz.part_* | gzip -dc | tar -C "$N8N_DIR" -xf - 2>/dev/null || true
   elif [ -f "$_restore_dir/files.tar.gz" ]; then
-    echo "  🔧 استرجاع الملفات..."
-    gzip -dc "$_restore_dir/files.tar.gz" \
-      | tar -C "$N8N_DIR" -xf - 2>/dev/null || true
+    gzip -dc "$_restore_dir/files.tar.gz" | tar -C "$N8N_DIR" -xf - 2>/dev/null || true
+  elif ls "$_restore_dir"/f.gz.p* >/dev/null 2>&1; then
+    cat "$_restore_dir"/f.gz.p* | gzip -dc | tar -C "$N8N_DIR" -xf - 2>/dev/null || true
+  elif [ -f "$_restore_dir/f.gz" ]; then
+    gzip -dc "$_restore_dir/f.gz" | tar -C "$N8N_DIR" -xf - 2>/dev/null || true
   fi
 
-  # حفظ المانيفست محلياً
   cp "$_manifest" "$HIST/${_bid}.json" 2>/dev/null || true
-
   rm -rf "$_restore_dir"
   echo "  🎉 تم الاسترجاع بنجاح!"
   return 0
