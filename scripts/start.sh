@@ -2,108 +2,59 @@
 set -eu
 umask 077
 
-N8N_DIR="${N8N_DIR:-/home/node/.n8n}"
-WORK="${WORK:-/backup-data}"
-MONITOR_INTERVAL="${MONITOR_INTERVAL:-30}"
+D="${N8N_DIR:-/home/node/.n8n}"
+W="${WORK:-/backup-data}"
+MI="${MONITOR_INTERVAL:-30}"
 
-mkdir -p "$N8N_DIR" "$WORK" "$WORK/history"
+mkdir -p "$D" "$W" "$W/h"
 export HOME="/home/node"
 
-: "${TG_BOT_TOKEN:?Set TG_BOT_TOKEN}"
-: "${TG_CHAT_ID:?Set TG_CHAT_ID}"
-: "${TG_ADMIN_ID:?Set TG_ADMIN_ID}"
-
+: "${TG_BOT_TOKEN:?}" "${TG_CHAT_ID:?}" "${TG_ADMIN_ID:?}"
 TG="https://api.telegram.org/bot${TG_BOT_TOKEN}"
 
-tg_msg() {
-  curl -sS -X POST "${TG}/sendMessage" \
-    -d "chat_id=${TG_ADMIN_ID}" \
-    -d "parse_mode=HTML" \
-    -d "text=$1" >/dev/null 2>&1 || true
-}
-
-echo ""
-echo "╔══════════════════════════════════════════════╗"
-echo "║  n8n + Telegram Smart Backup v4.0            ║"
-echo "╚══════════════════════════════════════════════╝"
-echo ""
-
-# ── فحص الأدوات ──
-ALL_OK=true
-for cmd in curl jq sqlite3 tar gzip split sha256sum \
-           stat du sort awk xargs find cut tr; do
-  command -v "$cmd" >/dev/null 2>&1 || { echo "❌ $cmd"; ALL_OK=false; }
+# ── فحص سريع ──
+for c in curl jq sqlite3 tar gzip split stat du awk find cut tr; do
+  command -v "$c" >/dev/null 2>&1 || { echo "❌ $c"; exit 1; }
 done
-[ "$ALL_OK" = "true" ] || exit 1
-echo "✅ كل الأدوات موجودة"
 
-# ── فحص البوت ──
-BOT_OK=$(curl -sS "${TG}/getMe" | jq -r '.ok // "false"')
-BOT_NAME=$(curl -sS "${TG}/getMe" | jq -r '.result.username // "?"')
-if [ "$BOT_OK" = "true" ]; then
-  echo "✅ البوت: @${BOT_NAME}"
-else
-  echo "❌ فشل الاتصال بالبوت"
-  exit 1
+# ── استرجاع (قبل n8n) ──
+if [ ! -s "$D/database.sqlite" ]; then
+  echo "📦 استرجاع..."
+  sh /scripts/restore.sh 2>&1 || true
+  [ -s "$D/database.sqlite" ] && echo "✅ تم" || echo "🆕 أول تشغيل"
 fi
 
-# ── الاسترجاع ──
-if [ ! -s "$N8N_DIR/database.sqlite" ]; then
-  echo ""
-  echo "📦 لا توجد داتابيس - جاري الاسترجاع..."
-  tg_msg "🔄 <b>جاري استرجاع البيانات...</b>"
+# ── n8n بالخلفية فوراً ──
+echo "🚀 n8n..."
+n8n start &
+P=$!
 
-  if sh /scripts/restore.sh 2>&1; then
-    if [ -s "$N8N_DIR/database.sqlite" ]; then
-      echo "✅ تم الاسترجاع!"
-      tg_msg "✅ <b>تم استرجاع البيانات بنجاح!</b>"
-    else
-      echo "🆕 أول تشغيل"
-      tg_msg "🆕 <b>أول تشغيل - لا توجد نسخة سابقة</b>"
-    fi
-  else
-    echo "🆕 أول تشغيل"
-  fi
-else
-  echo "✅ الداتابيس موجودة"
-fi
-echo ""
+# انتظر البورت
+T=0
+while [ "$T" -lt 45 ]; do
+  curl -so /dev/null "http://localhost:${N8N_PORT:-5678}/healthz" 2>/dev/null && break
+  T=$((T+1)); sleep 2
+done
 
-# ── البوت التفاعلي ──
-(
-  sleep 10
-  echo "[bot] 🤖 البوت التفاعلي شغّال"
-  sh /scripts/bot.sh 2>&1 | sed 's/^/[bot] /' &
-) &
+# ── إشعار ──
+curl -sS -X POST "${TG}/sendMessage" \
+  -d "chat_id=${TG_ADMIN_ID}" -d "parse_mode=HTML" \
+  -d "text=🚀 <b>n8n شغّال!</b> أرسل /start" >/dev/null 2>&1 || true
+
+# ── البوت ──
+( sleep 5; sh /scripts/bot.sh 2>&1 | sed 's/^/[bot] /' ) &
 
 # ── Keep-Alive ──
-(
-  sleep 60
-  while true; do
-    curl -sS -o /dev/null \
-      "http://localhost:${N8N_PORT:-5678}/healthz" 2>/dev/null || true
-    sleep 300
-  done
-) &
+( while true; do sleep 300
+  curl -so /dev/null "http://localhost:${N8N_PORT:-5678}/healthz" 2>/dev/null || true
+done ) &
 
-# ── مراقب الباك أب ──
-(
-  sleep 45
-  if [ -s "$N8N_DIR/database.sqlite" ]; then
-    echo "[backup] 🔥 باك أب فوري"
-    rm -f "$WORK/.backup_state"
-    sh /scripts/backup.sh 2>&1 | sed 's/^/[backup] /' || true
-  fi
+# ── باك أب ──
+( sleep 30
+  [ -s "$D/database.sqlite" ] && {
+    rm -f "$W/.bs"; sh /scripts/backup.sh 2>&1 | sed 's/^/[b] /' || true; }
+  while true; do sleep "$MI"
+    [ -s "$D/database.sqlite" ] && sh /scripts/backup.sh 2>&1 | sed 's/^/[b] /' || true
+  done ) &
 
-  while true; do
-    sleep "$MONITOR_INTERVAL"
-    [ -s "$N8N_DIR/database.sqlite" ] && \
-      sh /scripts/backup.sh 2>&1 | sed 's/^/[backup] /' || true
-  done
-) &
-
-tg_msg "🚀 <b>n8n شغّال الآن!</b>
-🤖 أرسل /start للتحكم"
-
-echo "🚀 تشغيل n8n..."
-exec n8n start
+wait $P
