@@ -2,232 +2,229 @@
 set -eu
 umask 077
 
-: "${TG_BOT_TOKEN:?}" "${TG_CHAT_ID:?}"
+: "${TG_BOT_TOKEN:?}"
+: "${TG_CHAT_ID:?}"
 
 N8N_DIR="${N8N_DIR:-/home/node/.n8n}"
 WORK="${WORK:-/backup-data}"
 HIST="$WORK/history"
 
-MIN_INTERVAL="${MIN_BACKUP_INTERVAL_SEC:-30}"
-FORCE_INTERVAL="${FORCE_BACKUP_EVERY_SEC:-900}"
-BACKUP_BINARY="${BACKUP_BINARYDATA:-true}"
-CHUNK_SIZE="${CHUNK_SIZE_BYTES:-19000000}"
+MIN_INT="${MIN_BACKUP_INTERVAL_SEC:-30}"
+FORCE_INT="${FORCE_BACKUP_EVERY_SEC:-900}"
+BKP_BIN="${BACKUP_BINARYDATA:-true}"
+GZIP_LVL="${GZIP_LEVEL:-1}"
+CHUNK="${CHUNK_SIZE:-18M}"
+CHUNK_BYTES=18874368
 
 STATE="$WORK/.backup_state"
 LOCK="$WORK/.backup_lock"
-TMP="$WORK/_backup_tmp"
+TMP="$WORK/_bkp_tmp"
+
 TG="https://api.telegram.org/bot${TG_BOT_TOKEN}"
 
 mkdir -p "$WORK" "$HIST"
 
-# ── قفل ──
-mkdir "$LOCK" 2>/dev/null || { echo "⏳ باك أب ثاني شغّال"; exit 0; }
+# ── القفل ──
+if ! mkdir "$LOCK" 2>/dev/null; then exit 0; fi
 trap 'rmdir "$LOCK" 2>/dev/null; rm -rf "$TMP" 2>/dev/null' EXIT
 
-# ══════════════════════════════
-# كشف التغييرات
-# ══════════════════════════════
-
-get_db_signature() {
-  _sig=""
+# ── كشف التغيير ──
+db_sig() {
+  _s=""
   for _f in database.sqlite database.sqlite-wal database.sqlite-shm; do
-    if [ -f "$N8N_DIR/$_f" ]; then
-      _sig="${_sig}$(stat -c '%Y%s' "$N8N_DIR/$_f" 2>/dev/null);"
-    fi
+    [ -f "$N8N_DIR/$_f" ] && \
+      _s="${_s}${_f}:$(stat -c '%Y:%s' "$N8N_DIR/$_f" 2>/dev/null || echo 0);"
   done
-  printf "%s" "$_sig"
+  printf "%s" "$_s"
 }
 
-get_binary_signature() {
-  if [ "$BACKUP_BINARY" != "true" ]; then
-    printf "skip"; return
-  fi
-  if [ ! -d "$N8N_DIR/binaryData" ]; then
-    printf "none"; return
-  fi
+bin_sig() {
+  [ "$BKP_BIN" = "true" ] || { printf "skip"; return; }
+  [ -d "$N8N_DIR/binaryData" ] || { printf "none"; return; }
   du -sk "$N8N_DIR/binaryData" 2>/dev/null | awk '{print $1}'
 }
 
-check_if_needed() {
-  [ -f "$N8N_DIR/database.sqlite" ] || { echo "NO_DB"; return; }
-
+should_bkp() {
+  [ -f "$N8N_DIR/database.sqlite" ] || { echo "NODB"; return; }
   _now=$(date +%s)
-  _last_epoch=0
-  _last_force=0
-  _last_db_sig=""
-  _last_bin_sig=""
-
+  _le=0; _lf=0; _ld=""; _lb=""
   if [ -f "$STATE" ]; then
-    _last_epoch=$(grep '^EPOCH=' "$STATE" 2>/dev/null | cut -d= -f2 || echo 0)
-    _last_force=$(grep '^FORCE_EPOCH=' "$STATE" 2>/dev/null | cut -d= -f2 || echo 0)
-    _last_db_sig=$(grep '^DB_SIG=' "$STATE" 2>/dev/null | cut -d= -f2- || true)
-    _last_bin_sig=$(grep '^BIN_SIG=' "$STATE" 2>/dev/null | cut -d= -f2- || true)
+    _le=$(grep '^LE=' "$STATE" 2>/dev/null | cut -d= -f2 || echo 0)
+    _lf=$(grep '^LF=' "$STATE" 2>/dev/null | cut -d= -f2 || echo 0)
+    _ld=$(grep '^LD=' "$STATE" 2>/dev/null | cut -d= -f2- || true)
+    _lb=$(grep '^LB=' "$STATE" 2>/dev/null | cut -d= -f2- || true)
   fi
-
-  _cur_db=$(get_db_signature)
-  _cur_bin=$(get_binary_signature)
-
-  [ $((_now - _last_force)) -ge "$FORCE_INTERVAL" ] && { echo "FORCE"; return; }
-  [ "$_cur_db" = "$_last_db_sig" ] && [ "$_cur_bin" = "$_last_bin_sig" ] && { echo "SAME"; return; }
-  [ $((_now - _last_epoch)) -lt "$MIN_INTERVAL" ] && { echo "WAIT"; return; }
-
-  echo "GO"
+  _cd=$(db_sig); _cb=$(bin_sig)
+  [ $((_now - _lf)) -ge "$FORCE_INT" ] && { echo "FORCE"; return; }
+  [ "$_cd" = "$_ld" ] && [ "$_cb" = "$_lb" ] && { echo "NOCHANGE"; return; }
+  [ $((_now - _le)) -lt "$MIN_INT" ] && { echo "COOLDOWN"; return; }
+  echo "CHANGED"
 }
 
-REASON=$(check_if_needed)
-case "$REASON" in
-  NO_DB|SAME|WAIT) exit 0 ;;
-esac
+DEC=$(should_bkp)
+case "$DEC" in NODB|NOCHANGE|COOLDOWN) exit 0;; esac
 
-# ══════════════════════════════
-# بدء الباك أب
-# ══════════════════════════════
+ID=$(date +"%Y-%m-%d_%H-%M-%S")
+TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-BACKUP_ID=$(date +"%Y-%m-%d_%H-%M-%S")
-BACKUP_TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+echo "┌─────────────────────────────────────┐"
+echo "│ 📦 باك أب: $ID ($DEC)"
+echo "└─────────────────────────────────────┘"
 
-echo "📦 باك أب: $BACKUP_ID ($REASON)"
+rm -rf "$TMP"; mkdir -p "$TMP/parts"
 
-rm -rf "$TMP"
-mkdir -p "$TMP/parts"
-
-# ── 1. DB dump ──
+# ── تصدير DB ──
+echo "  🗄️ تصدير الداتابيس..."
 sqlite3 "$N8N_DIR/database.sqlite" ".timeout 10000" \
   "PRAGMA wal_checkpoint(TRUNCATE);" >/dev/null 2>&1 || true
 
 sqlite3 "$N8N_DIR/database.sqlite" ".timeout 10000" ".dump" 2>/dev/null \
-  | gzip -n -1 -c > "$TMP/db.sql.gz"
+  | gzip -n -"$GZIP_LVL" -c > "$TMP/db.sql.gz"
 
-if [ ! -s "$TMP/db.sql.gz" ]; then
-  echo "❌ فشل dump الداتابيس"
-  exit 1
-fi
-
+[ -s "$TMP/db.sql.gz" ] || { echo "  ❌ فشل"; exit 1; }
 DB_SIZE=$(du -h "$TMP/db.sql.gz" | cut -f1)
+echo "  ✅ DB: $DB_SIZE"
 
-# ── 2. ملفات إضافية ──
-_exclude="--exclude=database.sqlite --exclude=database.sqlite-wal --exclude=database.sqlite-shm"
-[ "$BACKUP_BINARY" != "true" ] && _exclude="$_exclude --exclude=binaryData"
+# ── أرشيف الملفات ──
+echo "  📁 أرشفة الملفات..."
+_exc="--exclude=database.sqlite --exclude=database.sqlite-wal --exclude=database.sqlite-shm"
+[ "$BKP_BIN" != "true" ] && _exc="$_exc --exclude=binaryData"
 
-tar -C "$N8N_DIR" -cf - $_exclude . 2>/dev/null \
-  | gzip -n -1 -c > "$TMP/files.tar.gz" || true
+tar -C "$N8N_DIR" -cf - $_exc . 2>/dev/null \
+  | gzip -n -"$GZIP_LVL" -c > "$TMP/files.tar.gz" || true
 
 FILES_SIZE="0"
 [ -s "$TMP/files.tar.gz" ] && FILES_SIZE=$(du -h "$TMP/files.tar.gz" | cut -f1)
 
-# ── 3. تقسيم (كل جزء < 19MB) ──
-for _src in db.sql.gz files.tar.gz; do
-  [ -s "$TMP/$_src" ] || continue
-  _sz=$(stat -c '%s' "$TMP/$_src" 2>/dev/null || echo 0)
+# ── تقسيم ──
+echo "  ✂️ تجهيز..."
+_db_bytes=$(stat -c '%s' "$TMP/db.sql.gz" 2>/dev/null || echo 0)
+if [ "$_db_bytes" -gt "$CHUNK_BYTES" ]; then
+  split -b "$CHUNK" -d -a 3 "$TMP/db.sql.gz" "$TMP/parts/db.sql.gz.part_"
+  rm -f "$TMP/db.sql.gz"
+else
+  mv "$TMP/db.sql.gz" "$TMP/parts/db.sql.gz"
+fi
 
-  if [ "$_sz" -gt "$CHUNK_SIZE" ]; then
-    split -b "$CHUNK_SIZE" -d -a 3 "$TMP/$_src" "$TMP/parts/${_src}.part_"
-    rm -f "$TMP/$_src"
+if [ -s "$TMP/files.tar.gz" ]; then
+  _f_bytes=$(stat -c '%s' "$TMP/files.tar.gz" 2>/dev/null || echo 0)
+  if [ "$_f_bytes" -gt "$CHUNK_BYTES" ]; then
+    split -b "$CHUNK" -d -a 3 "$TMP/files.tar.gz" "$TMP/parts/files.tar.gz.part_"
+    rm -f "$TMP/files.tar.gz"
   else
-    mv "$TMP/$_src" "$TMP/parts/$_src"
+    mv "$TMP/files.tar.gz" "$TMP/parts/files.tar.gz"
   fi
-done
+fi
 
-# ── 4. رفع لتلكرام ──
+# ── رفع لـ Telegram ──
+echo "  📤 رفع إلى Telegram..."
+
 MANIFEST_FILES=""
 FILE_COUNT=0
 UPLOAD_OK=true
 
-for _file in "$TMP/parts"/*; do
-  [ -f "$_file" ] || continue
-  _fname=$(basename "$_file")
+for f in "$TMP/parts"/*; do
+  [ -f "$f" ] || continue
+  _fn=$(basename "$f")
+  _fs=$(du -h "$f" | cut -f1)
 
-  _retry=0
-  _uploaded=""
-
-  while [ "$_retry" -lt 3 ]; do
-    _response=$(curl -sS -X POST "${TG}/sendDocument" \
+  _try=0; _result=""
+  while [ "$_try" -lt 3 ]; do
+    _resp=$(curl -sS -X POST "${TG}/sendDocument" \
       -F "chat_id=${TG_CHAT_ID}" \
-      -F "document=@${_file}" \
-      -F "caption=🗂 #n8n_backup ${BACKUP_ID} | ${_fname}" \
-      2>/dev/null || true)
+      -F "document=@${f}" \
+      -F "caption=🗂 #n8n_backup ${ID} | ${_fn}" \
+      -F "parse_mode=HTML" 2>/dev/null || true)
 
-    _file_id=$(echo "$_response" | jq -r '.result.document.file_id // empty' 2>/dev/null || true)
-    _msg_id=$(echo "$_response" | jq -r '.result.message_id // empty' 2>/dev/null || true)
-    _ok=$(echo "$_response" | jq -r '.ok // "false"' 2>/dev/null || true)
+    _fid=$(echo "$_resp" | jq -r '.result.document.file_id // empty' 2>/dev/null || true)
+    _mid=$(echo "$_resp" | jq -r '.result.message_id // empty' 2>/dev/null || true)
+    _ok=$(echo "$_resp" | jq -r '.ok // "false"' 2>/dev/null || true)
 
-    if [ "$_ok" = "true" ] && [ -n "$_file_id" ]; then
-      _uploaded="yes"
-      MANIFEST_FILES="${MANIFEST_FILES}{\"file_id\":\"${_file_id}\",\"message_id\":${_msg_id},\"name\":\"${_fname}\"},"
+    if [ "$_ok" = "true" ] && [ -n "$_fid" ]; then
+      _result="ok"
+      MANIFEST_FILES="${MANIFEST_FILES}{\"msg_id\":${_mid},\"file_id\":\"${_fid}\",\"name\":\"${_fn}\"},"
       FILE_COUNT=$((FILE_COUNT + 1))
+      echo "    ✅ $_fn ($_fs)"
       break
     fi
 
-    _retry=$((_retry + 1))
+    _try=$((_try + 1))
+    echo "    ⚠️ إعادة $_try/3..."
     sleep 3
   done
 
-  if [ -z "$_uploaded" ]; then
-    UPLOAD_OK=false
-    break
-  fi
-
+  [ -n "$_result" ] || { UPLOAD_OK=false; break; }
   sleep 1
 done
 
-if [ "$UPLOAD_OK" != "true" ]; then
-  echo "❌ فشل الرفع"
-  exit 1
-fi
+[ "$UPLOAD_OK" = "true" ] || { echo "  ❌ فشل الرفع"; exit 1; }
 
+# ── المانيفست ──
+# إزالة الفاصلة الأخيرة
 MANIFEST_FILES=$(echo "$MANIFEST_FILES" | sed 's/,$//')
 
-# ── 5. مانيفست ──
 cat > "$TMP/manifest.json" <<EOF
 {
-  "id": "$BACKUP_ID",
-  "timestamp": "$BACKUP_TS",
-  "version": "5",
+  "id": "$ID",
+  "timestamp": "$TS",
+  "type": "n8n-telegram-backup",
+  "version": "4.0",
   "db_size": "$DB_SIZE",
   "files_size": "$FILES_SIZE",
   "file_count": $FILE_COUNT,
-  "backup_binary": "$BACKUP_BINARY",
-  "reason": "$REASON",
-  "files": [$MANIFEST_FILES]
+  "binary_data": "$BKP_BIN",
+  "files": [${MANIFEST_FILES}]
 }
 EOF
 
-cp "$TMP/manifest.json" "$HIST/${BACKUP_ID}.json"
+# حفظ بالتاريخ المحلي
+cp "$TMP/manifest.json" "$HIST/${ID}.json"
 
-_manifest_response=$(curl -sS -X POST "${TG}/sendDocument" \
+# إرسال المانيفست للقناة + تثبيت
+echo "  📋 إرسال المانيفست..."
+_man_resp=$(curl -sS -X POST "${TG}/sendDocument" \
   -F "chat_id=${TG_CHAT_ID}" \
-  -F "document=@$TMP/manifest.json;filename=manifest_${BACKUP_ID}.json" \
+  -F "document=@$TMP/manifest.json;filename=manifest_${ID}.json" \
   -F "caption=📋 #n8n_manifest #n8n_backup
-🆔 ${BACKUP_ID}
-🕒 ${BACKUP_TS}
+🆔 ${ID}
+🕒 ${TS}
 📦 ${FILE_COUNT} ملفات
-📊 DB: ${DB_SIZE}" 2>/dev/null || true)
+📊 DB: ${DB_SIZE}" \
+  -F "parse_mode=HTML" 2>/dev/null || true)
 
-_manifest_msg_id=$(echo "$_manifest_response" | jq -r '.result.message_id // empty' 2>/dev/null || true)
-if [ -n "$_manifest_msg_id" ]; then
+_man_mid=$(echo "$_man_resp" | jq -r '.result.message_id // empty' 2>/dev/null || true)
+
+if [ -n "$_man_mid" ]; then
   curl -sS -X POST "${TG}/pinChatMessage" \
     -d "chat_id=${TG_CHAT_ID}" \
-    -d "message_id=${_manifest_msg_id}" \
+    -d "message_id=${_man_mid}" \
     -d "disable_notification=true" >/dev/null 2>&1 || true
+  echo "  ✅ المانيفست مثبّت"
 fi
 
-# ── 6. حفظ الحالة ──
-_now=$(date +%s)
+# ── حفظ الحالة ──
 cat > "$STATE" <<EOF
-ID=$BACKUP_ID
-TS=$BACKUP_TS
-EPOCH=$_now
-FORCE_EPOCH=$_now
-DB_SIG=$(get_db_signature)
-BIN_SIG=$(get_binary_signature)
+ID=$ID
+TS=$TS
+LE=$(date +%s)
+LF=$(date +%s)
+LD=$(db_sig)
+LB=$(bin_sig)
 EOF
 
-# ── 7. تنظيف محلي ──
-_local_count=$(ls "$HIST"/*.json 2>/dev/null | wc -l || echo 0)
-if [ "$_local_count" -gt 15 ]; then
-  ls -t "$HIST"/*.json | tail -n +16 | xargs rm -f 2>/dev/null || true
+# ── تنظيف تلقائي (نحتفظ بآخر 20 محلياً) ──
+_hist_count=$(ls "$HIST"/*.json 2>/dev/null | wc -l || echo 0)
+if [ "$_hist_count" -gt 20 ]; then
+  for _old in $(ls -t "$HIST"/*.json | tail -n +21); do
+    rm -f "$_old"
+  done
 fi
 
 rm -rf "$TMP"
-echo "✅ اكتمل: $BACKUP_ID | $FILE_COUNT ملفات | DB: $DB_SIZE"
+
+echo ""
+echo "┌─────────────────────────────────────┐"
+echo "│ ✅ اكتمل! $ID                       │"
+echo "│ 📦 $FILE_COUNT ملفات | DB: $DB_SIZE  │"
+echo "└─────────────────────────────────────┘"
 exit 0
