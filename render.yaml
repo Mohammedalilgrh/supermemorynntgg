@@ -1,0 +1,58 @@
+services:
+  - type: web
+    name: supermemorynn
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    envVars:
+      # ── Telegram ──
+      - key: TG_BOT_TOKEN
+        sync: false
+      - key: TG_CHAT_ID
+        sync: false
+
+      # ── Backup Timing ──
+      - key: MONITOR_INTERVAL
+        value: "45"
+      - key: MIN_BACKUP_INTERVAL_SEC
+        value: "60"
+      - key: FORCE_BACKUP_EVERY_SEC
+        value: "900"
+      - key: BACKUP_BINARYDATA
+        value: "true"
+
+      # ── n8n Settings ──
+      - key: EXECUTIONS_DATA_PRUNE
+        value: "true"
+      - key: EXECUTIONS_DATA_MAX_AGE
+        value: "168"
+      - key: EXECUTIONS_DATA_SAVE_ON_SUCCESS
+        value: "none"
+
+      # ── n8n Network ──
+      - key: N8N_PORT
+        value: "5678"
+      - key: PORT
+        value: "5678"
+      - key: N8N_PROTOCOL
+        value: "https"
+      - key: N8N_HOST
+        sync: false
+      - key: WEBHOOK_URL
+        sync: false
+
+      # ── n8n Security ──
+      - key: N8N_ENCRYPTION_KEY
+        sync: false
+      - key: N8N_BASIC_AUTH_ACTIVE
+        value: "true"
+      - key: N8N_BASIC_AUTH_USER
+        sync: false
+      - key: N8N_BASIC_AUTH_PASSWORD
+        sync: false
+
+      # ── General ──
+      - key: GENERIC_TIMEZONE
+        value: "Asia/Baghdad"
+      - key: N8N_DIAGNOSTICS_ENABLED
+        value: "false"
