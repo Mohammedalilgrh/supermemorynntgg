@@ -10,26 +10,28 @@ services:
         sync: false
       - key: TG_CHAT_ID
         sync: false
+      - key: TG_ADMIN_ID
+        sync: false
 
-      # ── Backup Timing ──
+      # ── Backup ──
       - key: MONITOR_INTERVAL
-        value: "45"
+        value: "30"
       - key: MIN_BACKUP_INTERVAL_SEC
-        value: "60"
+        value: "30"
       - key: FORCE_BACKUP_EVERY_SEC
         value: "900"
       - key: BACKUP_BINARYDATA
         value: "true"
+      - key: CHUNK_SIZE
+        value: "18M"
 
-      # ── n8n Settings ──
+      # ── n8n ──
       - key: EXECUTIONS_DATA_PRUNE
         value: "true"
       - key: EXECUTIONS_DATA_MAX_AGE
         value: "168"
       - key: EXECUTIONS_DATA_SAVE_ON_SUCCESS
         value: "none"
-
-      # ── n8n Network ──
       - key: N8N_PORT
         value: "5678"
       - key: PORT
@@ -40,8 +42,6 @@ services:
         sync: false
       - key: WEBHOOK_URL
         sync: false
-
-      # ── n8n Security ──
       - key: N8N_ENCRYPTION_KEY
         sync: false
       - key: N8N_BASIC_AUTH_ACTIVE
@@ -50,8 +50,6 @@ services:
         sync: false
       - key: N8N_BASIC_AUTH_PASSWORD
         sync: false
-
-      # ── General ──
       - key: GENERIC_TIMEZONE
         value: "Asia/Baghdad"
       - key: N8N_DIAGNOSTICS_ENABLED
