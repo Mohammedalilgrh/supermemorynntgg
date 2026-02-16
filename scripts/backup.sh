@@ -20,7 +20,7 @@ TG="https://api.telegram.org/bot${TG_BOT_TOKEN}"
 
 mkdir -p "$WORK" "$HIST"
 
-# ── قفل (منع تشغيل مزدوج) ──
+# ── قفل ──
 mkdir "$LOCK" 2>/dev/null || { echo "⏳ باك أب ثاني شغّال"; exit 0; }
 trap 'rmdir "$LOCK" 2>/dev/null; rm -rf "$TMP" 2>/dev/null' EXIT
 
@@ -67,20 +67,9 @@ check_if_needed() {
   _cur_db=$(get_db_signature)
   _cur_bin=$(get_binary_signature)
 
-  # إجباري كل فترة
-  if [ $((_now - _last_force)) -ge "$FORCE_INTERVAL" ]; then
-    echo "FORCE"; return
-  fi
-
-  # لا تغيير
-  if [ "$_cur_db" = "$_last_db_sig" ] && [ "$_cur_bin" = "$_last_bin_sig" ]; then
-    echo "SAME"; return
-  fi
-
-  # تغيير بس لسة بدري
-  if [ $((_now - _last_epoch)) -lt "$MIN_INTERVAL" ]; then
-    echo "WAIT"; return
-  fi
+  [ $((_now - _last_force)) -ge "$FORCE_INTERVAL" ] && { echo "FORCE"; return; }
+  [ "$_cur_db" = "$_last_db_sig" ] && [ "$_cur_bin" = "$_last_bin_sig" ] && { echo "SAME"; return; }
+  [ $((_now - _last_epoch)) -lt "$MIN_INTERVAL" ] && { echo "WAIT"; return; }
 
   echo "GO"
 }
@@ -94,7 +83,7 @@ esac
 # بدء الباك أب
 # ══════════════════════════════
 
-BACKUP_ID=$(date +"%Y%m%d_%H%M%S")
+BACKUP_ID=$(date +"%Y-%m-%d_%H-%M-%S")
 BACKUP_TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
 echo "📦 باك أب: $BACKUP_ID ($REASON)"
@@ -116,7 +105,7 @@ fi
 
 DB_SIZE=$(du -h "$TMP/db.sql.gz" | cut -f1)
 
-# ── 2. ملفات إضافية (config, credentials, etc) ──
+# ── 2. ملفات إضافية ──
 _exclude="--exclude=database.sqlite --exclude=database.sqlite-wal --exclude=database.sqlite-shm"
 [ "$BACKUP_BINARY" != "true" ] && _exclude="$_exclude --exclude=binaryData"
 
@@ -132,7 +121,6 @@ for _src in db.sql.gz files.tar.gz; do
   _sz=$(stat -c '%s' "$TMP/$_src" 2>/dev/null || echo 0)
 
   if [ "$_sz" -gt "$CHUNK_SIZE" ]; then
-    # تقسيم بأسماء: db.sql.gz.part_000, db.sql.gz.part_001, ...
     split -b "$CHUNK_SIZE" -d -a 3 "$TMP/$_src" "$TMP/parts/${_src}.part_"
     rm -f "$TMP/$_src"
   else
@@ -187,7 +175,6 @@ if [ "$UPLOAD_OK" != "true" ]; then
   exit 1
 fi
 
-# إزالة الفاصلة الأخيرة
 MANIFEST_FILES=$(echo "$MANIFEST_FILES" | sed 's/,$//')
 
 # ── 5. مانيفست ──
@@ -205,20 +192,17 @@ cat > "$TMP/manifest.json" <<EOF
 }
 EOF
 
-# حفظ محلي
 cp "$TMP/manifest.json" "$HIST/${BACKUP_ID}.json"
 
-# رفع المانيفست
 _manifest_response=$(curl -sS -X POST "${TG}/sendDocument" \
   -F "chat_id=${TG_CHAT_ID}" \
   -F "document=@$TMP/manifest.json;filename=manifest_${BACKUP_ID}.json" \
-  -F "caption=📋 #n8n_manifest
+  -F "caption=📋 #n8n_manifest #n8n_backup
 🆔 ${BACKUP_ID}
 🕒 ${BACKUP_TS}
 📦 ${FILE_COUNT} ملفات
 📊 DB: ${DB_SIZE}" 2>/dev/null || true)
 
-# تثبيت المانيفست
 _manifest_msg_id=$(echo "$_manifest_response" | jq -r '.result.message_id // empty' 2>/dev/null || true)
 if [ -n "$_manifest_msg_id" ]; then
   curl -sS -X POST "${TG}/pinChatMessage" \
@@ -238,7 +222,7 @@ DB_SIG=$(get_db_signature)
 BIN_SIG=$(get_binary_signature)
 EOF
 
-# ── 7. تنظيف محلي (آخر 15) ──
+# ── 7. تنظيف محلي ──
 _local_count=$(ls "$HIST"/*.json 2>/dev/null | wc -l || echo 0)
 if [ "$_local_count" -gt 15 ]; then
   ls -t "$HIST"/*.json | tail -n +16 | xargs rm -f 2>/dev/null || true
