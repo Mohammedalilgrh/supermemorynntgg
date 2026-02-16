@@ -5,12 +5,15 @@ services:
     dockerfilePath: ./Dockerfile
     plan: free
     envVars:
+      # ── Telegram ──
       - key: TG_BOT_TOKEN
         sync: false
       - key: TG_CHAT_ID
         sync: false
       - key: TG_ADMIN_ID
         sync: false
+
+      # ── Backup ──
       - key: MONITOR_INTERVAL
         value: "30"
       - key: MIN_BACKUP_INTERVAL_SEC
@@ -19,8 +22,10 @@ services:
         value: "900"
       - key: BACKUP_BINARYDATA
         value: "true"
-      - key: CHUNK_SIZE_BYTES
-        value: "19000000"
+      - key: CHUNK_SIZE
+        value: "18M"
+
+      # ── n8n ──
       - key: EXECUTIONS_DATA_PRUNE
         value: "true"
       - key: EXECUTIONS_DATA_MAX_AGE
