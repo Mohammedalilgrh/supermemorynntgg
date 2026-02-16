@@ -2,229 +2,168 @@
 set -eu
 umask 077
 
-: "${TG_BOT_TOKEN:?}"
-: "${TG_CHAT_ID:?}"
+: "${TG_BOT_TOKEN:?}" "${TG_CHAT_ID:?}"
 
-N8N_DIR="${N8N_DIR:-/home/node/.n8n}"
-WORK="${WORK:-/backup-data}"
-HIST="$WORK/history"
+D="${N8N_DIR:-/home/node/.n8n}"
+W="${WORK:-/backup-data}"
+H="$W/h"
 
-MIN_INT="${MIN_BACKUP_INTERVAL_SEC:-30}"
-FORCE_INT="${FORCE_BACKUP_EVERY_SEC:-900}"
-BKP_BIN="${BACKUP_BINARYDATA:-true}"
-GZIP_LVL="${GZIP_LEVEL:-1}"
-CHUNK="${CHUNK_SIZE:-18M}"
-CHUNK_BYTES=18874368
+MI="${MIN_BACKUP_INTERVAL_SEC:-30}"
+FI="${FORCE_BACKUP_EVERY_SEC:-900}"
+BB="${BACKUP_BINARYDATA:-true}"
+# 19MB - أقل من حد Telegram 20MB للتحميل
+CS="${CHUNK_SIZE_BYTES:-19000000}"
 
-STATE="$WORK/.backup_state"
-LOCK="$WORK/.backup_lock"
-TMP="$WORK/_bkp_tmp"
-
+S="$W/.bs"
+L="$W/.bl"
+TMP="$W/_bt"
 TG="https://api.telegram.org/bot${TG_BOT_TOKEN}"
 
-mkdir -p "$WORK" "$HIST"
+mkdir -p "$W" "$H"
 
-# ── القفل ──
-if ! mkdir "$LOCK" 2>/dev/null; then exit 0; fi
-trap 'rmdir "$LOCK" 2>/dev/null; rm -rf "$TMP" 2>/dev/null' EXIT
+# قفل
+mkdir "$L" 2>/dev/null || exit 0
+trap 'rmdir "$L" 2>/dev/null; rm -rf "$TMP" 2>/dev/null' EXIT
 
 # ── كشف التغيير ──
-db_sig() {
-  _s=""
-  for _f in database.sqlite database.sqlite-wal database.sqlite-shm; do
-    [ -f "$N8N_DIR/$_f" ] && \
-      _s="${_s}${_f}:$(stat -c '%Y:%s' "$N8N_DIR/$_f" 2>/dev/null || echo 0);"
+dsig() {
+  s=""
+  for f in database.sqlite database.sqlite-wal database.sqlite-shm; do
+    [ -f "$D/$f" ] && s="${s}$(stat -c '%Y%s' "$D/$f" 2>/dev/null);" || true
   done
-  printf "%s" "$_s"
+  printf "%s" "$s"
 }
 
-bin_sig() {
-  [ "$BKP_BIN" = "true" ] || { printf "skip"; return; }
-  [ -d "$N8N_DIR/binaryData" ] || { printf "none"; return; }
-  du -sk "$N8N_DIR/binaryData" 2>/dev/null | awk '{print $1}'
+bsig() {
+  [ "$BB" = "true" ] || { printf "s"; return; }
+  [ -d "$D/binaryData" ] || { printf "n"; return; }
+  du -sk "$D/binaryData" 2>/dev/null | awk '{print $1}'
 }
 
-should_bkp() {
-  [ -f "$N8N_DIR/database.sqlite" ] || { echo "NODB"; return; }
-  _now=$(date +%s)
-  _le=0; _lf=0; _ld=""; _lb=""
-  if [ -f "$STATE" ]; then
-    _le=$(grep '^LE=' "$STATE" 2>/dev/null | cut -d= -f2 || echo 0)
-    _lf=$(grep '^LF=' "$STATE" 2>/dev/null | cut -d= -f2 || echo 0)
-    _ld=$(grep '^LD=' "$STATE" 2>/dev/null | cut -d= -f2- || true)
-    _lb=$(grep '^LB=' "$STATE" 2>/dev/null | cut -d= -f2- || true)
+chk() {
+  [ -f "$D/database.sqlite" ] || { echo "X"; return; }
+  n=$(date +%s); le=0; lf=0; ld=""; lb=""
+  if [ -f "$S" ]; then
+    le=$(grep '^E=' "$S" 2>/dev/null | cut -d= -f2 || echo 0)
+    lf=$(grep '^F=' "$S" 2>/dev/null | cut -d= -f2 || echo 0)
+    ld=$(grep '^D=' "$S" 2>/dev/null | cut -d= -f2- || true)
+    lb=$(grep '^B=' "$S" 2>/dev/null | cut -d= -f2- || true)
   fi
-  _cd=$(db_sig); _cb=$(bin_sig)
-  [ $((_now - _lf)) -ge "$FORCE_INT" ] && { echo "FORCE"; return; }
-  [ "$_cd" = "$_ld" ] && [ "$_cb" = "$_lb" ] && { echo "NOCHANGE"; return; }
-  [ $((_now - _le)) -lt "$MIN_INT" ] && { echo "COOLDOWN"; return; }
-  echo "CHANGED"
+  cd=$(dsig); cb=$(bsig)
+  [ $((n-lf)) -ge "$FI" ] && { echo "FORCE"; return; }
+  [ "$cd" = "$ld" ] && [ "$cb" = "$lb" ] && { echo "SAME"; return; }
+  [ $((n-le)) -lt "$MI" ] && { echo "WAIT"; return; }
+  echo "GO"
 }
 
-DEC=$(should_bkp)
-case "$DEC" in NODB|NOCHANGE|COOLDOWN) exit 0;; esac
+R=$(chk)
+case "$R" in X|SAME|WAIT) exit 0;; esac
 
-ID=$(date +"%Y-%m-%d_%H-%M-%S")
+ID=$(date +"%Y%m%d_%H%M%S")
 TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-echo "┌─────────────────────────────────────┐"
-echo "│ 📦 باك أب: $ID ($DEC)"
-echo "└─────────────────────────────────────┘"
+echo "📦 $ID ($R)"
 
-rm -rf "$TMP"; mkdir -p "$TMP/parts"
+rm -rf "$TMP"; mkdir -p "$TMP/p"
 
-# ── تصدير DB ──
-echo "  🗄️ تصدير الداتابيس..."
-sqlite3 "$N8N_DIR/database.sqlite" ".timeout 10000" \
+# ── DB dump ──
+sqlite3 "$D/database.sqlite" ".timeout 10000" \
   "PRAGMA wal_checkpoint(TRUNCATE);" >/dev/null 2>&1 || true
 
-sqlite3 "$N8N_DIR/database.sqlite" ".timeout 10000" ".dump" 2>/dev/null \
-  | gzip -n -"$GZIP_LVL" -c > "$TMP/db.sql.gz"
+sqlite3 "$D/database.sqlite" ".timeout 10000" ".dump" 2>/dev/null \
+  | gzip -n -1 -c > "$TMP/d.gz"
 
-[ -s "$TMP/db.sql.gz" ] || { echo "  ❌ فشل"; exit 1; }
-DB_SIZE=$(du -h "$TMP/db.sql.gz" | cut -f1)
-echo "  ✅ DB: $DB_SIZE"
+[ -s "$TMP/d.gz" ] || { echo "❌ DB"; exit 1; }
+DBS=$(du -h "$TMP/d.gz" | cut -f1)
 
-# ── أرشيف الملفات ──
-echo "  📁 أرشفة الملفات..."
-_exc="--exclude=database.sqlite --exclude=database.sqlite-wal --exclude=database.sqlite-shm"
-[ "$BKP_BIN" != "true" ] && _exc="$_exc --exclude=binaryData"
+# ── ملفات إضافية ──
+exc="--exclude=database.sqlite --exclude=database.sqlite-wal --exclude=database.sqlite-shm"
+[ "$BB" != "true" ] && exc="$exc --exclude=binaryData"
+tar -C "$D" -cf - $exc . 2>/dev/null | gzip -n -1 -c > "$TMP/f.gz" || true
+FS="0"
+[ -s "$TMP/f.gz" ] && FS=$(du -h "$TMP/f.gz" | cut -f1)
 
-tar -C "$N8N_DIR" -cf - $_exc . 2>/dev/null \
-  | gzip -n -"$GZIP_LVL" -c > "$TMP/files.tar.gz" || true
-
-FILES_SIZE="0"
-[ -s "$TMP/files.tar.gz" ] && FILES_SIZE=$(du -h "$TMP/files.tar.gz" | cut -f1)
-
-# ── تقسيم ──
-echo "  ✂️ تجهيز..."
-_db_bytes=$(stat -c '%s' "$TMP/db.sql.gz" 2>/dev/null || echo 0)
-if [ "$_db_bytes" -gt "$CHUNK_BYTES" ]; then
-  split -b "$CHUNK" -d -a 3 "$TMP/db.sql.gz" "$TMP/parts/db.sql.gz.part_"
-  rm -f "$TMP/db.sql.gz"
-else
-  mv "$TMP/db.sql.gz" "$TMP/parts/db.sql.gz"
-fi
-
-if [ -s "$TMP/files.tar.gz" ]; then
-  _f_bytes=$(stat -c '%s' "$TMP/files.tar.gz" 2>/dev/null || echo 0)
-  if [ "$_f_bytes" -gt "$CHUNK_BYTES" ]; then
-    split -b "$CHUNK" -d -a 3 "$TMP/files.tar.gz" "$TMP/parts/files.tar.gz.part_"
-    rm -f "$TMP/files.tar.gz"
+# ── تقسيم (كل جزء < 19MB حتى Telegram يكدر يحمّله) ──
+for src in d.gz f.gz; do
+  [ -s "$TMP/$src" ] || continue
+  sz=$(stat -c '%s' "$TMP/$src" 2>/dev/null || echo 0)
+  if [ "$sz" -gt "$CS" ]; then
+    split -b "$CS" -d -a 3 "$TMP/$src" "$TMP/p/${src}.p"
+    rm -f "$TMP/$src"
   else
-    mv "$TMP/files.tar.gz" "$TMP/parts/files.tar.gz"
+    mv "$TMP/$src" "$TMP/p/$src"
   fi
-fi
+done
 
-# ── رفع لـ Telegram ──
-echo "  📤 رفع إلى Telegram..."
+# ── رفع ──
+MF=""
+FC=0
+OK=true
 
-MANIFEST_FILES=""
-FILE_COUNT=0
-UPLOAD_OK=true
-
-for f in "$TMP/parts"/*; do
+for f in "$TMP/p"/*; do
   [ -f "$f" ] || continue
-  _fn=$(basename "$f")
-  _fs=$(du -h "$f" | cut -f1)
-
-  _try=0; _result=""
-  while [ "$_try" -lt 3 ]; do
-    _resp=$(curl -sS -X POST "${TG}/sendDocument" \
+  fn=$(basename "$f")
+  try=0; res=""
+  while [ "$try" -lt 3 ]; do
+    rsp=$(curl -sS -X POST "${TG}/sendDocument" \
       -F "chat_id=${TG_CHAT_ID}" \
       -F "document=@${f}" \
-      -F "caption=🗂 #n8n_backup ${ID} | ${_fn}" \
-      -F "parse_mode=HTML" 2>/dev/null || true)
+      -F "caption=🗂 #n8n_backup ${ID} | ${fn}" 2>/dev/null || true)
 
-    _fid=$(echo "$_resp" | jq -r '.result.document.file_id // empty' 2>/dev/null || true)
-    _mid=$(echo "$_resp" | jq -r '.result.message_id // empty' 2>/dev/null || true)
-    _ok=$(echo "$_resp" | jq -r '.ok // "false"' 2>/dev/null || true)
+    fid=$(echo "$rsp" | jq -r '.result.document.file_id // empty' 2>/dev/null || true)
+    mid=$(echo "$rsp" | jq -r '.result.message_id // empty' 2>/dev/null || true)
+    ok=$(echo "$rsp" | jq -r '.ok // "false"' 2>/dev/null || true)
 
-    if [ "$_ok" = "true" ] && [ -n "$_fid" ]; then
-      _result="ok"
-      MANIFEST_FILES="${MANIFEST_FILES}{\"msg_id\":${_mid},\"file_id\":\"${_fid}\",\"name\":\"${_fn}\"},"
-      FILE_COUNT=$((FILE_COUNT + 1))
-      echo "    ✅ $_fn ($_fs)"
+    if [ "$ok" = "true" ] && [ -n "$fid" ]; then
+      res="y"
+      MF="${MF}{\"m\":${mid},\"f\":\"${fid}\",\"n\":\"${fn}\"},"
+      FC=$((FC+1))
       break
     fi
-
-    _try=$((_try + 1))
-    echo "    ⚠️ إعادة $_try/3..."
-    sleep 3
+    try=$((try+1)); sleep 3
   done
-
-  [ -n "$_result" ] || { UPLOAD_OK=false; break; }
+  [ -n "$res" ] || { OK=false; break; }
   sleep 1
 done
 
-[ "$UPLOAD_OK" = "true" ] || { echo "  ❌ فشل الرفع"; exit 1; }
+[ "$OK" = "true" ] || { echo "❌ رفع"; exit 1; }
 
-# ── المانيفست ──
-# إزالة الفاصلة الأخيرة
-MANIFEST_FILES=$(echo "$MANIFEST_FILES" | sed 's/,$//')
+MF=$(echo "$MF" | sed 's/,$//')
 
-cat > "$TMP/manifest.json" <<EOF
-{
-  "id": "$ID",
-  "timestamp": "$TS",
-  "type": "n8n-telegram-backup",
-  "version": "4.0",
-  "db_size": "$DB_SIZE",
-  "files_size": "$FILES_SIZE",
-  "file_count": $FILE_COUNT,
-  "binary_data": "$BKP_BIN",
-  "files": [${MANIFEST_FILES}]
-}
+# ── مانيفست ──
+cat > "$TMP/m.json" <<EOF
+{"id":"$ID","ts":"$TS","v":"4","db":"$DBS","fs":"$FS","fc":$FC,"bb":"$BB","files":[$MF]}
 EOF
 
-# حفظ بالتاريخ المحلي
-cp "$TMP/manifest.json" "$HIST/${ID}.json"
+cp "$TMP/m.json" "$H/${ID}.json"
 
-# إرسال المانيفست للقناة + تثبيت
-echo "  📋 إرسال المانيفست..."
-_man_resp=$(curl -sS -X POST "${TG}/sendDocument" \
+mr=$(curl -sS -X POST "${TG}/sendDocument" \
   -F "chat_id=${TG_CHAT_ID}" \
-  -F "document=@$TMP/manifest.json;filename=manifest_${ID}.json" \
-  -F "caption=📋 #n8n_manifest #n8n_backup
-🆔 ${ID}
-🕒 ${TS}
-📦 ${FILE_COUNT} ملفات
-📊 DB: ${DB_SIZE}" \
-  -F "parse_mode=HTML" 2>/dev/null || true)
+  -F "document=@$TMP/m.json;filename=m_${ID}.json" \
+  -F "caption=📋 #n8n_manifest
+🆔 ${ID} | 🕒 ${TS}
+📦 ${FC} | 📊 ${DBS}" 2>/dev/null || true)
 
-_man_mid=$(echo "$_man_resp" | jq -r '.result.message_id // empty' 2>/dev/null || true)
+mm=$(echo "$mr" | jq -r '.result.message_id // empty' 2>/dev/null || true)
+[ -n "$mm" ] && curl -sS -X POST "${TG}/pinChatMessage" \
+  -d "chat_id=${TG_CHAT_ID}" -d "message_id=${mm}" \
+  -d "disable_notification=true" >/dev/null 2>&1 || true
 
-if [ -n "$_man_mid" ]; then
-  curl -sS -X POST "${TG}/pinChatMessage" \
-    -d "chat_id=${TG_CHAT_ID}" \
-    -d "message_id=${_man_mid}" \
-    -d "disable_notification=true" >/dev/null 2>&1 || true
-  echo "  ✅ المانيفست مثبّت"
-fi
-
-# ── حفظ الحالة ──
-cat > "$STATE" <<EOF
-ID=$ID
-TS=$TS
-LE=$(date +%s)
-LF=$(date +%s)
-LD=$(db_sig)
-LB=$(bin_sig)
+# ── حالة ──
+n=$(date +%s)
+cat > "$S" <<EOF
+I=$ID
+T=$TS
+E=$n
+F=$n
+D=$(dsig)
+B=$(bsig)
 EOF
 
-# ── تنظيف تلقائي (نحتفظ بآخر 20 محلياً) ──
-_hist_count=$(ls "$HIST"/*.json 2>/dev/null | wc -l || echo 0)
-if [ "$_hist_count" -gt 20 ]; then
-  for _old in $(ls -t "$HIST"/*.json | tail -n +21); do
-    rm -f "$_old"
-  done
-fi
+# تنظيف (آخر 15 محلياً)
+lc=$(ls "$H"/*.json 2>/dev/null | wc -l || echo 0)
+[ "$lc" -gt 15 ] && ls -t "$H"/*.json | tail -n +16 | xargs rm -f 2>/dev/null || true
 
 rm -rf "$TMP"
-
-echo ""
-echo "┌─────────────────────────────────────┐"
-echo "│ ✅ اكتمل! $ID                       │"
-echo "│ 📦 $FILE_COUNT ملفات | DB: $DB_SIZE  │"
-echo "└─────────────────────────────────────┘"
+echo "✅ $ID | $FC files | DB:$DBS"
 exit 0
