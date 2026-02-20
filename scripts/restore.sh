@@ -21,126 +21,98 @@ mkdir -p "$N8N_DIR" "$WORK" "$HIST" "$TMP"
 
 echo "=== 🔍 البحث عن آخر باك أب في Telegram ==="
 
-# ── تحميل ملف بـ file_id ──
+# ── تحميل ملف صغير فقط (مانيفست) ──
 dl_file() {
   _fid="$1"
   _out="$2"
-  _max_try="${3:-3}"
   _try=0
-
-  while [ "$_try" -lt "$_max_try" ]; do
-    _resp=$(curl -sS --max-time 15 \
-      "${TG}/getFile?file_id=${_fid}" 2>/dev/null || true)
-    _path=$(echo "$_resp" | jq -r '.result.file_path // empty' 2>/dev/null || true)
-
+  while [ "$_try" -lt 3 ]; do
+    _path=$(curl -sS --max-time 15 \
+      "${TG}/getFile?file_id=${_fid}" \
+      | jq -r '.result.file_path // empty' 2>/dev/null || true)
     if [ -n "$_path" ]; then
-      if curl -sS --max-time 120 -o "$_out" \
+      curl -sS --max-time 60 -o "$_out" \
         "https://api.telegram.org/file/bot${TG_BOT_TOKEN}/${_path}" \
-        2>/dev/null; then
-        [ -s "$_out" ] && return 0
-      fi
+        2>/dev/null && [ -s "$_out" ] && return 0
     fi
-
     _try=$((_try + 1))
-    echo "    ⚠️ إعادة المحاولة $_try/$_max_try..."
     sleep 3
   done
   return 1
 }
 
-# ── استرجاع من مانيفست ──
+# ── تحميل ملف وبث محتواه مباشرة لـ stdout (بدون حفظ) ──
+stream_file() {
+  _fid="$1"
+  _path=$(curl -sS --max-time 15 \
+    "${TG}/getFile?file_id=${_fid}" \
+    | jq -r '.result.file_path // empty' 2>/dev/null || true)
+  [ -n "$_path" ] || return 1
+  curl -sS --max-time 300 \
+    "https://api.telegram.org/file/bot${TG_BOT_TOKEN}/${_path}" \
+    2>/dev/null
+}
+
+# ══════════════════════════════════════════════
+# الاسترجاع الذكي: streaming بدون تخزين مؤقت
+# ══════════════════════════════════════════════
 restore_from_manifest() {
   _mfile="$1"
 
-  # تحقق من صحة JSON
-  if ! jq empty "$_mfile" 2>/dev/null; then
-    echo "  ❌ المانيفست تالف أو غير صالح"
+  jq empty "$_mfile" 2>/dev/null || {
+    echo "  ❌ المانيفست تالف"
     return 1
-  fi
+  }
 
   _bid=$(jq -r '.id // "unknown"' "$_mfile" 2>/dev/null || echo "unknown")
-  _bfc=$(jq -r '.file_count // 0' "$_mfile" 2>/dev/null || echo "0")
   _bdb=$(jq -r '.db_size // "?"' "$_mfile" 2>/dev/null || echo "?")
+  _bfc=$(jq -r '.file_count // 0' "$_mfile" 2>/dev/null || echo "0")
 
   echo "  📋 باك أب: $_bid"
   echo "  📦 ملفات: $_bfc | DB: $_bdb"
 
-  _rdir="$TMP/data_restore"
-  rm -rf "$_rdir"
-  mkdir -p "$_rdir"
+  # ── استخرج قوائم الملفات من المانيفست ──
+  _db_parts=$(jq -r '.files[] | select(.name | startswith("db.sql.gz")) | "\(.file_id)|\(.name)"' \
+    "$_mfile" 2>/dev/null || true)
 
-  # تحميل كل الملفات
-  _dl_failed=false
+  _file_parts=$(jq -r '.files[] | select(.name | startswith("files.tar.gz")) | "\(.file_id)|\(.name)"' \
+    "$_mfile" 2>/dev/null || true)
 
-  # استخراج قائمة الملفات من المانيفست
-  _files_json=$(jq -r '.files[] | "\(.file_id)|\(.name)"' "$_mfile" 2>/dev/null || true)
-
-  if [ -z "$_files_json" ]; then
-    echo "  ❌ لا توجد ملفات في المانيفست"
-    rm -rf "$_rdir"
+  # ── تحقق من وجود DB ──
+  if [ -z "$_db_parts" ]; then
+    echo "  ❌ لا توجد ملفات DB في المانيفست"
     return 1
   fi
 
-  echo "$_files_json" | while IFS='|' read -r _fid _fn; do
-    [ -n "$_fid" ] && [ -n "$_fn" ] || continue
-    echo "    📥 تحميل: $_fn"
+  # ══════════════════════════════════════════
+  # استرجاع DB - streaming مباشر بدون تخزين
+  # ══════════════════════════════════════════
+  echo "  🗄️ استرجاع DB بالبث المباشر..."
 
-    if dl_file "$_fid" "$_rdir/$_fn" 3; then
-      _sz=$(du -h "$_rdir/$_fn" 2>/dev/null | cut -f1 || echo "?")
-      echo "      ✅ $_fn ($_sz)"
-    else
-      echo "      ❌ فشل تحميل: $_fn"
-      touch "$_rdir/.dl_failed"
-    fi
-    sleep 1
-  done
+  _db_count=$(echo "$_db_parts" | grep -c '|' || echo 0)
+  echo "    📦 $_db_count جزء(أجزاء) DB"
 
-  # تحقق من فشل التحميل
-  if [ -f "$_rdir/.dl_failed" ]; then
-    echo "  ❌ فشل تحميل بعض الملفات"
-    rm -rf "$_rdir"
-    return 1
-  fi
+  # احذف DB القديمة
+  rm -f "$N8N_DIR/database.sqlite" \
+        "$N8N_DIR/database.sqlite-wal" \
+        "$N8N_DIR/database.sqlite-shm" 2>/dev/null || true
 
-  # تحقق أن هناك ملفات فعلاً
-  _dl_count=$(find "$_rdir" -type f ! -name '.dl_failed' 2>/dev/null | wc -l || echo 0)
-  if [ "$_dl_count" -eq 0 ]; then
-    echo "  ❌ لم يتم تحميل أي ملفات"
-    rm -rf "$_rdir"
-    return 1
-  fi
-
-  echo "  ✅ تم تحميل $_dl_count ملفات"
-
-  # ── استرجاع DB ──
-  echo "  🗄️ استرجاع قاعدة البيانات..."
+  # بث كل أجزاء DB مرتبة → فك ضغط → بناء DB
   _db_ok=false
+  (
+    echo "$_db_parts" | sort -t'|' -k2 | while IFS='|' read -r _fid _fn; do
+      [ -n "$_fid" ] || continue
+      echo "    📥 بث: $_fn" >&2
+      stream_file "$_fid" || {
+        echo "    ❌ فشل بث: $_fn" >&2
+        exit 1
+      }
+    done
+  ) | gzip -dc | sqlite3 "$N8N_DIR/database.sqlite" 2>/dev/null && _db_ok=true
 
-  # تحقق من وجود أجزاء أو ملف كامل
-  _part_count=$(ls -1 "$_rdir"/db.sql.gz.part_* 2>/dev/null | wc -l || echo 0)
-
-  if [ "$_part_count" -gt 0 ]; then
-    echo "    📦 دمج $_part_count أجزاء..."
-    _parts_sorted=$(ls -v "$_rdir"/db.sql.gz.part_* 2>/dev/null || true)
-    if cat $_parts_sorted | gzip -dc | sqlite3 "$N8N_DIR/database.sqlite" 2>/dev/null; then
-      _db_ok=true
-    fi
-  elif [ -f "$_rdir/db.sql.gz" ]; then
-    echo "    📦 استرجاع ملف كامل..."
-    if gzip -dc "$_rdir/db.sql.gz" | sqlite3 "$N8N_DIR/database.sqlite" 2>/dev/null; then
-      _db_ok=true
-    fi
-  else
-    echo "  ❌ لا توجد ملفات DB في النسخة"
-    rm -rf "$_rdir"
-    return 1
-  fi
-
-  # تحقق من صحة DB
   if [ "$_db_ok" = "false" ] || [ ! -s "$N8N_DIR/database.sqlite" ]; then
     echo "  ❌ فشل بناء قاعدة البيانات"
     rm -f "$N8N_DIR/database.sqlite" 2>/dev/null || true
-    rm -rf "$_rdir"
     return 1
   fi
 
@@ -149,39 +121,63 @@ restore_from_manifest() {
     2>/dev/null || echo 0)
 
   if [ "$_tc" -eq 0 ]; then
-    echo "  ❌ قاعدة البيانات فارغة أو تالفة"
+    echo "  ❌ قاعدة البيانات فارغة"
     rm -f "$N8N_DIR/database.sqlite" 2>/dev/null || true
-    rm -rf "$_rdir"
     return 1
   fi
 
-  echo "  ✅ قاعدة البيانات جاهزة - $_tc جدول"
+  echo "  ✅ DB جاهزة - $_tc جدول"
 
-  # ── استرجاع ملفات الإعدادات ──
-  echo "  📁 استرجاع ملفات الإعدادات..."
+  # ══════════════════════════════════════════
+  # استرجاع الملفات - streaming مع تخطي
+  # binaryData تلقائياً إذا كانت كبيرة
+  # ══════════════════════════════════════════
+  if [ -n "$_file_parts" ]; then
+    _file_count=$(echo "$_file_parts" | grep -c '|' || echo 0)
+    echo "  📁 استرجاع الإعدادات بالبث المباشر ($_file_count جزء)..."
 
-  _fpart_count=$(ls -1 "$_rdir"/files.tar.gz.part_* 2>/dev/null | wc -l || echo 0)
+    # إذا كان أكثر من 10 أجزاء = binaryData ضخمة = نتخطى
+    if [ "$_file_count" -gt 10 ]; then
+      echo "  ⚠️ الملفات كبيرة جداً ($_file_count × 18MB)"
+      echo "  ⏭️ تخطي binaryData - فقط إعدادات n8n أساسية"
 
-  if [ "$_fpart_count" -gt 0 ]; then
-    _fparts_sorted=$(ls -v "$_rdir"/files.tar.gz.part_* 2>/dev/null || true)
-    cat $_fparts_sorted | gzip -dc | \
-      tar -C "$N8N_DIR" -xf - 2>/dev/null || true
-    echo "  ✅ ملفات الإعدادات مسترجعة (أجزاء)"
-  elif [ -f "$_rdir/files.tar.gz" ]; then
-    gzip -dc "$_rdir/files.tar.gz" | \
-      tar -C "$N8N_DIR" -xf - 2>/dev/null || true
-    echo "  ✅ ملفات الإعدادات مسترجعة"
+      # نحمل أول جزء فقط (يحتوي على الإعدادات الأساسية)
+      _first_fid=$(echo "$_file_parts" | sort -t'|' -k2 | head -1 | cut -d'|' -f1)
+      _first_fn=$(echo "$_file_parts" | sort -t'|' -k2 | head -1 | cut -d'|' -f2)
+
+      if [ -n "$_first_fid" ]; then
+        echo "    📥 بث الإعدادات الأساسية: $_first_fn"
+        stream_file "$_first_fid" | gzip -dc | \
+          tar -C "$N8N_DIR" -xf - \
+            --exclude='./binaryData/*' \
+            --exclude='binaryData/*' \
+            2>/dev/null || true
+        echo "  ✅ الإعدادات الأساسية مسترجعة"
+      fi
+    else
+      # أجزاء قليلة - stream الكل
+      (
+        echo "$_file_parts" | sort -t'|' -k2 | while IFS='|' read -r _fid _fn; do
+          [ -n "$_fid" ] || continue
+          echo "    📥 بث: $_fn" >&2
+          stream_file "$_fid" || true
+        done
+      ) | gzip -dc | \
+        tar -C "$N8N_DIR" -xf - \
+          --exclude='./binaryData/*' \
+          --exclude='binaryData/*' \
+          2>/dev/null || true
+      echo "  ✅ الملفات مسترجعة"
+    fi
   else
-    echo "  ℹ️ لا توجد ملفات إعدادات (سيستخدم الافتراضي)"
+    echo "  ℹ️ لا توجد ملفات إعدادات"
   fi
 
-  # حفظ المانيفست محلياً للسجل
+  # حفظ المانيفست محلياً
   cp "$_mfile" "$HIST/${_bid}.json" 2>/dev/null || true
 
-  rm -rf "$_rdir"
-
   echo ""
-  echo "  🎉 الاسترجاع اكتمل بنجاح!"
+  echo "  🎉 اكتمل الاسترجاع!"
   echo "  🆔 $_bid | 📋 $_tc جدول"
   return 0
 }
@@ -205,20 +201,18 @@ _pin_cap=$(echo "$_chat_info" | \
 
 if [ -n "$_pin_fid" ] && echo "$_pin_cap" | grep -q "n8n_manifest"; then
   echo "  📌 وجدنا مانيفست مثبّت!"
-  if dl_file "$_pin_fid" "$TMP/manifest_pin.json" 3; then
+  if dl_file "$_pin_fid" "$TMP/manifest_pin.json" 3>/dev/null; then
     if restore_from_manifest "$TMP/manifest_pin.json"; then
       exit 0
     fi
-    echo "  ⚠️ فشل الاسترجاع من المانيفست المثبّت"
-  else
-    echo "  ⚠️ فشل تحميل المانيفست المثبّت"
+    echo "  ⚠️ فشل - نجرب طريقة أخرى"
   fi
 else
   echo "  📭 لا يوجد مانيفست مثبّت"
 fi
 
 # ════════════════════════════════
-# الطريقة 2: آخر رسائل القناة
+# الطريقة 2: رسائل القناة
 # ════════════════════════════════
 echo ""
 echo "🔍 [2/3] البحث في رسائل القناة..."
@@ -226,29 +220,27 @@ echo "🔍 [2/3] البحث في رسائل القناة..."
 _updates=$(curl -sS --max-time 20 \
   "${TG}/getUpdates?offset=-100&limit=100" 2>/dev/null || true)
 
-if [ -n "$_updates" ]; then
-  _found_fid=$(echo "$_updates" | jq -r '
-    [
-      .result[] |
-      select(
-        (.channel_post.document != null) and
-        ((.channel_post.caption // "") | test("n8n_manifest"))
-      )
-    ] |
-    sort_by(-.channel_post.date) |
-    .[0].channel_post.document.file_id // empty
-  ' 2>/dev/null || true)
+_found_fid=$(echo "$_updates" | jq -r '
+  [
+    .result[] |
+    select(
+      (.channel_post.document != null) and
+      ((.channel_post.caption // "") | test("n8n_manifest"))
+    )
+  ] |
+  sort_by(-.channel_post.date) |
+  .[0].channel_post.document.file_id // empty
+' 2>/dev/null || true)
 
-  if [ -n "$_found_fid" ]; then
-    echo "  📋 وجدنا مانيفست في رسائل القناة!"
-    if dl_file "$_found_fid" "$TMP/manifest_search.json" 3; then
-      if restore_from_manifest "$TMP/manifest_search.json"; then
-        exit 0
-      fi
+if [ -n "$_found_fid" ]; then
+  echo "  📋 وجدنا مانيفست!"
+  if dl_file "$_found_fid" "$TMP/manifest_search.json"; then
+    if restore_from_manifest "$TMP/manifest_search.json"; then
+      exit 0
     fi
-  else
-    echo "  📭 لم نجد مانيفست في الرسائل"
   fi
+else
+  echo "  📭 لم نجد مانيفست"
 fi
 
 # ════════════════════════════════
@@ -257,18 +249,16 @@ fi
 echo ""
 echo "🔍 [3/3] البحث في السجل المحلي..."
 
-_local_latest=$(ls -t "$HIST"/*.json 2>/dev/null | head -1 || true)
-
-if [ -n "$_local_latest" ] && [ -f "$_local_latest" ]; then
-  echo "  📂 وجدنا سجل محلي: $(basename "$_local_latest")"
-  if restore_from_manifest "$_local_latest"; then
+_local=$(ls -t "$HIST"/*.json 2>/dev/null | head -1 || true)
+if [ -n "$_local" ] && [ -f "$_local" ]; then
+  echo "  📂 وجدنا: $(basename "$_local")"
+  if restore_from_manifest "$_local"; then
     exit 0
   fi
-  echo "  ⚠️ فشل الاسترجاع من السجل المحلي"
 else
   echo "  📭 لا يوجد سجل محلي"
 fi
 
 echo ""
-echo "📭 لا توجد نسخة احتياطية - سيبدأ n8n من جديد"
+echo "📭 لا توجد نسخة - n8n سيبدأ من جديد"
 exit 0
