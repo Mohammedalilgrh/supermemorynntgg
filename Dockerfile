@@ -1,37 +1,28 @@
-FROM alpine:3.20 AS tools
-
-RUN apk add --no-cache \
-      curl jq sqlite tar gzip \
-      coreutils findutils ca-certificates && \
-    mkdir -p /toolbox && \
-    for cmd in curl jq sqlite3 split sha256sum \
-               stat du sort tail awk xargs find \
-               wc cut tr gzip tar cat date sleep \
-               mkdir rm ls grep sed head touch \
-               cp mv basename expr; do \
-      p="$(which $cmd 2>/dev/null)" && \
-        [ -f "$p" ] && cp "$p" /toolbox/ || true; \
-    done
-
 FROM docker.n8n.io/n8nio/n8n:2.7.4
 
 USER root
 
-COPY --from=tools /toolbox/        /usr/local/bin/
-COPY --from=tools /usr/lib/        /usr/local/lib/
-COPY --from=tools /lib/            /usr/local/lib2/
-COPY --from=tools /etc/ssl/certs/  /etc/ssl/certs/
+COPY --from=alpine:3.20 /usr/bin/curl /usr/bin/curl
+COPY --from=alpine:3.20 /usr/bin/jq /usr/bin/jq
+COPY --from=alpine:3.20 /usr/bin/sqlite3 /usr/bin/sqlite3
+COPY --from=alpine:3.20 /bin/tar /bin/tar
+COPY --from=alpine:3.20 /bin/gzip /bin/gzip
+COPY --from=alpine:3.20 /usr/bin/split /usr/bin/split
+COPY --from=alpine:3.20 /usr/bin/du /usr/bin/du
+COPY --from=alpine:3.20 /usr/bin/stat /usr/bin/stat
 
-ENV LD_LIBRARY_PATH="/usr/local/lib:/usr/local/lib2:$LD_LIBRARY_PATH"
-ENV PATH="/usr/local/bin:$PATH"
+RUN mkdir -p /home/node/tmp /scripts /backup-data && \
+    chown -R node:node /home/node/.n8n /home/node/tmp /scripts /backup-data && \
+    apk add --no-cache coreutils findutils
 
-RUN mkdir -p /scripts /backup-data /home/node/.n8n && \
-    chown -R node:node /home/node/.n8n /scripts /backup-data
+ENV TMPDIR=/home/node/tmp
+ENV TMP=/home/node/tmp
+ENV TEMP=/home/node/tmp
+ENV NODE_OPTIONS="--max-old-space-size=512"
 
 COPY --chown=node:node scripts/ /scripts/
-
-RUN sed -i 's/\r$//' /scripts/*.sh && \
-    chmod 0755 /scripts/*.sh
+RUN find /scripts -name '*.sh' -exec chmod 755 {} \; && \
+    find /scripts -name '*.sh' -exec sed -i 's/\r$//' {} \;
 
 USER node
 WORKDIR /home/node
