@@ -4,11 +4,7 @@ services:
     runtime: docker
     dockerfilePath: ./Dockerfile
     plan: free
-    buildFilter:
-      paths:
-        - Dockerfile
-        - scripts/**
-        - render.yaml
+    healthCheckPath: /healthz
     envVars:
       - key: TG_BOT_TOKEN
         sync: false
