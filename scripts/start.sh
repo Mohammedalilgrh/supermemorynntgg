@@ -1,5 +1,9 @@
 #!/bin/sh
 set -eu
+export WORK="${WORK:-/backup-data}"
+export TMP="${WORK}/_tmp"
+mkdir -p "$TMP" "$WORK/history"
+rm -rf "$TMP"/*  # مهم جداً
 umask 077
 
 N8N_DIR="${N8N_DIR:-/home/node/.n8n}"
