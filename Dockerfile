@@ -1,38 +1,38 @@
-FROM node:18-alpine AS tools
+FROM alpine:3.19
 
+# Install everything from Alpine repos (all same libc - zero conflicts)
 RUN apk add --no-cache \
+      nodejs \
+      npm \
       curl \
       jq \
       sqlite \
-      tar \
-      gzip \
       coreutils \
       findutils \
-      ca-certificates \
-      bash
-
-FROM docker.n8n.io/n8nio/n8n:latest
-
-USER root
-
-RUN apk add --no-cache \
-      curl \
-      jq \
-      sqlite \
-      tar \
-      gzip \
-      coreutils \
-      findutils \
-      ca-certificates \
       bash \
-      tini && \
-    mkdir -p /scripts /backup-data /backup-data/history /home/node/.n8n && \
+      tar \
+      gzip \
+      ca-certificates \
+      python3 \
+      make \
+      g++ \
+      su-exec
+
+# Install n8n globally
+RUN npm install -g n8n@2.7.4 --no-audit --no-fund 2>&1 | tail -5
+
+# Create user matching n8n expectations
+RUN addgroup -g 1000 node && \
+    adduser -u 1000 -G node -s /bin/sh -D node 2>/dev/null || true
+
+# Directories
+RUN mkdir -p /scripts /backup-data /backup-data/history /home/node/.n8n && \
     chown -R node:node /home/node/.n8n /scripts /backup-data
 
 COPY --chown=node:node scripts/ /scripts/
 
-RUN find /scripts -name "*.sh" -exec sed -i 's/\r$//' {} \; && \
-    find /scripts -name "*.sh" -exec chmod 0755 {} \;
+RUN sed -i 's/\r$//' /scripts/*.sh && \
+    chmod 0755 /scripts/*.sh
 
 ENV N8N_USER_FOLDER=/home/node/.n8n
 ENV GENERIC_TIMEZONE=Asia/Baghdad
@@ -40,9 +40,10 @@ ENV N8N_DIAGNOSTICS_ENABLED=false
 ENV EXECUTIONS_DATA_PRUNE=true
 ENV EXECUTIONS_DATA_MAX_AGE=168
 ENV EXECUTIONS_DATA_SAVE_ON_SUCCESS=none
-ENV DB_SQLITE_VACUUM_ON_STARTUP=true
+ENV HOME=/home/node
+ENV PATH="/usr/local/bin:${PATH}"
 
 USER node
 WORKDIR /home/node
 
-ENTRYPOINT ["sh", "/scripts/start.sh"]
+ENTRYPOINT ["bash", "/scripts/start.sh"]
