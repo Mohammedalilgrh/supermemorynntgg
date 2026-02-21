@@ -16,7 +16,6 @@ mkdir -p "$N8N_DIR" "$WORK" "$HIST"
 rm -rf "$TMP" 2>/dev/null || true
 mkdir -p "$TMP"
 
-# إذا DB موجودة وصالحة لا نعمل شيء
 if [ -s "$N8N_DIR/database.sqlite" ]; then
   _tc=$(sqlite3 "$N8N_DIR/database.sqlite" \
     "SELECT count(*) FROM sqlite_master WHERE type='table';" 2>/dev/null || echo 0)
@@ -29,7 +28,7 @@ fi
 echo "=== 🔍 البحث عن باك أب ==="
 
 # ══════════════════════════════════════════════
-# دالة تحميل ملف
+# تحميل ملف
 # ══════════════════════════════════════════════
 dl_file() {
   _fid="$1"
@@ -54,12 +53,11 @@ dl_file() {
 }
 
 # ══════════════════════════════════════════════
-# الاسترجاع من مانيفست
+# الاسترجاع
 # ══════════════════════════════════════════════
 restore_from_manifest() {
   _mfile="$1"
 
-  # تحقق JSON
   if ! jq empty "$_mfile" 2>/dev/null; then
     echo "❌ مانيفست تالف"
     return 1
@@ -68,100 +66,79 @@ restore_from_manifest() {
   _bid=$(jq -r '.id // "unknown"' "$_mfile")
   _bfc=$(jq -r '.file_count // 0' "$_mfile")
   _bdb=$(jq -r '.db_size // "?"' "$_mfile")
-  _ver=$(jq -r '.version // "?"' "$_mfile")
-  echo "📋 باك أب: $_bid | v$_ver | ملفات: $_bfc | DB: $_bdb"
+  echo "📋 $_bid | ملفات: $_bfc | DB: $_bdb"
 
-  # ── استخراج ملفات DB فقط ──
-  _db_ids=""
-  _db_names=""
-  _db_count=0
+  # ── ملفات DB فقط ──
+  _db_list=$(jq -r \
+    '.files[] | select(.name | startswith("db.")) | "\(.file_id)|\(.name)"' \
+    "$_mfile" 2>/dev/null | sort -t'|' -k2 || true)
 
-  while IFS='|' read -r _fid _fn; do
-    [ -n "$_fid" ] && [ -n "$_fn" ] || continue
-    _db_ids="${_db_ids}${_fid}|${_fn}
-"
-    _db_count=$((_db_count + 1))
-  done <<< "$(jq -r '.files[] | select(.name | startswith("db.")) | "\(.file_id)|\(.name)"' "$_mfile" 2>/dev/null)"
-
-  if [ "$_db_count" -eq 0 ]; then
-    echo "❌ لا توجد ملفات DB في المانيفست"
+  [ -n "$_db_list" ] || {
+    echo "❌ لا توجد ملفات DB"
     return 1
-  fi
+  }
 
-  echo "🗄️ تحميل DB ($_db_count جزء)..."
+  _db_count=$(echo "$_db_list" | wc -l | tr -d ' ')
+  echo "🗄️ DB: $_db_count جزء"
 
-  # ── تنظيف القديم ──
   rm -f "$N8N_DIR/database.sqlite" \
         "$N8N_DIR/database.sqlite-wal" \
         "$N8N_DIR/database.sqlite-shm" 2>/dev/null || true
 
-  # ── تحميل أجزاء DB ──
+  # ── تحميل ──
   mkdir -p "$TMP/dbp"
-  _dl_fail=false
 
-  echo "$_db_ids" | sort -t'|' -k2 | while IFS='|' read -r _fid _fn; do
+  while IFS='|' read -r _fid _fn; do
     [ -n "$_fid" ] && [ -n "$_fn" ] || continue
     echo "  📥 $_fn"
     if dl_file "$_fid" "$TMP/dbp/$_fn" 3; then
-      _sz=$(du -h "$TMP/dbp/$_fn" | cut -f1)
-      echo "  ✅ $_fn ($_sz)"
+      echo "  ✅ $_fn ($(du -h "$TMP/dbp/$_fn" | cut -f1))"
     else
-      echo "  ❌ فشل: $_fn"
+      echo "  ❌ $_fn"
       touch "$TMP/dbp/.failed"
     fi
     sleep 1
-  done
+  done <<< "$_db_list"
 
-  if [ -f "$TMP/dbp/.failed" ]; then
-    echo "❌ فشل تحميل بعض أجزاء DB"
+  [ ! -f "$TMP/dbp/.failed" ] || {
+    echo "❌ فشل تحميل DB"
     rm -rf "$TMP/dbp"
     return 1
-  fi
+  }
 
-  # ── تحقق من وجود الملفات ──
-  _actual_files=$(find "$TMP/dbp" -type f -name 'db.*' | wc -l)
-  if [ "$_actual_files" -eq 0 ]; then
-    echo "❌ لم يتم تحميل أي ملفات DB"
+  _actual=$(find "$TMP/dbp" -type f -name 'db.*' | wc -l)
+  [ "$_actual" -gt 0 ] || {
+    echo "❌ لا ملفات DB"
     rm -rf "$TMP/dbp"
     return 1
-  fi
-  echo "📦 $_actual_files ملف(ات) DB محمّلة"
+  }
 
   # ── بناء DB ──
-  echo "🔧 بناء قاعدة البيانات..."
+  echo "🔧 بناء DB..."
 
-  _build_ok=false
-  if [ "$_actual_files" -eq 1 ]; then
-    _only_file=$(find "$TMP/dbp" -type f -name 'db.*' | head -1)
-    if gzip -dc "$_only_file" 2>/dev/null | sqlite3 "$N8N_DIR/database.sqlite" 2>/dev/null; then
-      _build_ok=true
-    fi
+  if [ "$_actual" -eq 1 ]; then
+    _f=$(find "$TMP/dbp" -type f -name 'db.*' | head -1)
+    gzip -dc "$_f" 2>/dev/null | sqlite3 "$N8N_DIR/database.sqlite" 2>/dev/null
   else
-    _sorted_files=$(find "$TMP/dbp" -type f -name 'db.*' | sort)
-    if cat $_sorted_files 2>/dev/null | gzip -dc 2>/dev/null | sqlite3 "$N8N_DIR/database.sqlite" 2>/dev/null; then
-      _build_ok=true
-    fi
+    cat $(find "$TMP/dbp" -type f -name 'db.*' | sort) 2>/dev/null | \
+      gzip -dc 2>/dev/null | sqlite3 "$N8N_DIR/database.sqlite" 2>/dev/null
   fi
 
   rm -rf "$TMP/dbp"
 
-  if [ "$_build_ok" = "false" ] || [ ! -s "$N8N_DIR/database.sqlite" ]; then
-    echo "❌ فشل بناء DB"
-    rm -f "$N8N_DIR/database.sqlite" 2>/dev/null || true
+  [ -s "$N8N_DIR/database.sqlite" ] || {
+    echo "❌ DB فارغة"
     return 1
-  fi
+  }
 
-  # ── تحقق من صحة DB ──
   _tc=$(sqlite3 "$N8N_DIR/database.sqlite" \
     "SELECT count(*) FROM sqlite_master WHERE type='table';" 2>/dev/null || echo 0)
-
-  if [ "$_tc" -lt 3 ]; then
-    echo "❌ DB تالفة أو فارغة ($_tc جداول)"
-    rm -f "$N8N_DIR/database.sqlite" 2>/dev/null || true
+  [ "$_tc" -gt 3 ] || {
+    echo "❌ DB تالفة ($_tc جداول)"
+    rm -f "$N8N_DIR/database.sqlite"
     return 1
-  fi
+  }
 
-  # ── تحقق من المحتوى ──
   _users=$(sqlite3 "$N8N_DIR/database.sqlite" \
     "SELECT count(*) FROM \"user\";" 2>/dev/null || echo 0)
   _emails=$(sqlite3 "$N8N_DIR/database.sqlite" \
@@ -172,7 +149,7 @@ restore_from_manifest() {
     "SELECT count(*) FROM workflow_entity;" 2>/dev/null || echo 0)
 
   echo ""
-  echo "✅ DB جاهزة!"
+  echo "✅ DB:"
   echo "   📋 جداول: $_tc"
   echo "   👤 مستخدمين: $_users"
   echo "   📧 emails: $_emails"
@@ -180,47 +157,79 @@ restore_from_manifest() {
   echo "   ⚙️ workflows: $_wf"
 
   # ══════════════════════════════════════════
-  # إصلاح إعداد الـ owner setup
-  # هذا يمنع ظهور صفحة التسجيل
+  # إصلاح owner setup - كل الصيغ الممكنة
+  # هذا يمنع /setup من الظهور
   # ══════════════════════════════════════════
   if [ "$_users" -gt 0 ]; then
-    echo "🔧 إصلاح إعداد owner setup..."
+    echo ""
+    echo "🔧 إصلاح إعدادات n8n..."
 
+    # أولاً نشوف الإعدادات الحالية
+    echo "  الإعدادات قبل الإصلاح:"
+    sqlite3 "$N8N_DIR/database.sqlite" \
+      "SELECT key, value FROM settings WHERE key LIKE '%owner%' OR key LIKE '%userManagement%';" \
+      2>/dev/null || true
+
+    # إصلاح بكل الصيغ الممكنة
     sqlite3 "$N8N_DIR/database.sqlite" <<'FIXSQL'
-INSERT OR REPLACE INTO settings (key, value, "loadOnStartup")
-VALUES ('userManagement.isInstanceOwnerSetUp', '"true"', 1);
+-- حذف القديمة
+DELETE FROM settings WHERE key = 'userManagement.isInstanceOwnerSetUp';
+
+-- إدراج بالصيغة الصحيحة (بدون علامات تنصيص حول true)
+INSERT INTO settings (key, value, "loadOnStartup")
+VALUES ('userManagement.isInstanceOwnerSetUp', 'true', 1);
+
+-- تأكد أن أول مستخدم هو global:owner
+UPDATE "user" SET role = 'global:owner'
+WHERE id = (SELECT id FROM "user" ORDER BY "createdAt" ASC LIMIT 1)
+AND role IS NOT NULL;
+
+-- تأكد من وجود personal project لكل مستخدم
+INSERT OR IGNORE INTO project (id, name, type)
+SELECT
+  lower(hex(randomblob(8)) || '-' || hex(randomblob(4)) || '-4' || substr(hex(randomblob(2)),2) || '-' || substr('89ab',abs(random()) % 4 + 1, 1) || substr(hex(randomblob(2)),2) || '-' || hex(randomblob(6))),
+  email,
+  'personal'
+FROM "user"
+WHERE id NOT IN (
+  SELECT pr."userId" FROM project_relation pr
+  JOIN project p ON p.id = pr."projectId"
+  WHERE p.type = 'personal'
+);
 FIXSQL
 
-    _check=$(sqlite3 "$N8N_DIR/database.sqlite" \
-      "SELECT value FROM settings WHERE key='userManagement.isInstanceOwnerSetUp';" 2>/dev/null || echo "?")
-    echo "   ✅ ownerSetUp = $_check"
+    echo "  الإعدادات بعد الإصلاح:"
+    sqlite3 "$N8N_DIR/database.sqlite" \
+      "SELECT key, value FROM settings WHERE key LIKE '%owner%' OR key LIKE '%userManagement%';" \
+      2>/dev/null || true
+
+    # تحقق من role أول مستخدم
+    _first_role=$(sqlite3 "$N8N_DIR/database.sqlite" \
+      "SELECT role FROM \"user\" ORDER BY \"createdAt\" ASC LIMIT 1;" \
+      2>/dev/null || echo "?")
+    echo "  أول مستخدم role: $_first_role"
   fi
 
   # ══════════════════════════════════════════
-  # استرجاع ملفات الإعدادات (فقط إذا قليلة)
+  # إعدادات الملفات (فقط إذا قليلة)
   # ══════════════════════════════════════════
-  _cfg_count=0
-  while IFS='|' read -r _fid _fn; do
-    [ -n "$_fid" ] && [ -n "$_fn" ] || continue
-    _cfg_count=$((_cfg_count + 1))
-  done <<< "$(jq -r '.files[] | select(.name | startswith("files.")) | "\(.file_id)|\(.name)"' "$_mfile" 2>/dev/null)"
+  _cfg_count=$(jq -r '.files[] | select(.name | startswith("files.")) | .name' \
+    "$_mfile" 2>/dev/null | wc -l || echo 0)
 
   if [ "$_cfg_count" -gt 0 ] && [ "$_cfg_count" -le 3 ]; then
-    echo "📁 استرجاع إعدادات ($_cfg_count ملف)..."
+    echo "📁 إعدادات ($_cfg_count)..."
     mkdir -p "$TMP/cfgp"
 
-    jq -r '.files[] | select(.name | startswith("files.")) | "\(.file_id)|\(.name)"' "$_mfile" 2>/dev/null | \
-    sort -t'|' -k2 | while IFS='|' read -r _fid _fn; do
+    jq -r '.files[] | select(.name | startswith("files.")) | "\(.file_id)|\(.name)"' \
+      "$_mfile" 2>/dev/null | sort -t'|' -k2 | \
+    while IFS='|' read -r _fid _fn; do
       [ -n "$_fid" ] && [ -n "$_fn" ] || continue
-      echo "  📥 $_fn"
       dl_file "$_fid" "$TMP/cfgp/$_fn" 3 || true
       sleep 1
     done
 
-    _cfg_actual=$(find "$TMP/cfgp" -type f -name 'files.*' 2>/dev/null | wc -l)
-    if [ "$_cfg_actual" -gt 0 ]; then
-      _cfg_sorted=$(find "$TMP/cfgp" -type f -name 'files.*' | sort)
-      cat $_cfg_sorted 2>/dev/null | gzip -dc 2>/dev/null | \
+    if find "$TMP/cfgp" -type f -name 'files.*' | grep -q '.'; then
+      cat $(find "$TMP/cfgp" -type f -name 'files.*' | sort) | gzip -dc | \
         tar -C "$N8N_DIR" -xf - \
           --exclude='./binaryData' \
           --exclude='./binaryData/*' \
@@ -229,110 +238,88 @@ FIXSQL
           --exclude='./database.sqlite-wal' \
           --exclude='./database.sqlite-shm' \
           2>/dev/null || true
-      echo "  ✅ إعدادات مسترجعة"
+      echo "  ✅ إعدادات"
     fi
     rm -rf "$TMP/cfgp"
-
   elif [ "$_cfg_count" -gt 3 ]; then
-    echo "⏭️ تخطي الإعدادات (كبيرة: $_cfg_count جزء = binaryData)"
-    echo "   binaryData في Cloudflare R2 - لا حاجة"
+    echo "⏭️ تخطي إعدادات (binaryData: $_cfg_count جزء)"
   fi
 
   # ══════════════════════════════════════════
-  # إنشاء/تحديث config لو مش موجود
+  # config + encryption key
   # ══════════════════════════════════════════
-  if [ -n "${N8N_ENCRYPTION_KEY:-}" ] && [ ! -f "$N8N_DIR/config" ]; then
-    echo "🔐 إنشاء config بـ encryption key..."
+  if [ -n "${N8N_ENCRYPTION_KEY:-}" ]; then
+    echo "🔐 كتابة config..."
     printf '{"encryptionKey":"%s"}' "$N8N_ENCRYPTION_KEY" > "$N8N_DIR/config"
-    echo "  ✅ config تم إنشاؤه"
+    echo "  ✅ config"
   fi
 
-  # حفظ المانيفست محلياً
   cp "$_mfile" "$HIST/${_bid}.json" 2>/dev/null || true
 
   rm -rf "$TMP"
   echo ""
-  echo "🎉 اكتمل الاسترجاع!"
-  echo "   🆔 $_bid"
-  echo "   📋 $_tc جدول | 👤 $_users مستخدم | ⚙️ $_wf workflow"
+  echo "🎉 اكتمل: $_bid | $_tc جدول | $_users مستخدم | $_wf workflow"
   return 0
 }
 
 # ════════════════════════════════════════════
-# طريقة 1: الرسالة المثبّتة
+# طريقة 1: مثبّتة
 # ════════════════════════════════════════════
 echo ""
-echo "🔍 [1/3] الرسالة المثبّتة..."
+echo "🔍 [1/3] المثبّتة..."
 
 _chat=$(curl -sS --max-time 15 \
   "${TG}/getChat?chat_id=${TG_CHAT_ID}" 2>/dev/null || true)
-
-_pin_fid=$(echo "$_chat" | \
-  jq -r '.result.pinned_message.document.file_id // empty' 2>/dev/null || true)
-_pin_cap=$(echo "$_chat" | \
-  jq -r '.result.pinned_message.caption // ""' 2>/dev/null || true)
+_pin_fid=$(echo "$_chat" | jq -r '.result.pinned_message.document.file_id // empty' 2>/dev/null || true)
+_pin_cap=$(echo "$_chat" | jq -r '.result.pinned_message.caption // ""' 2>/dev/null || true)
 
 if [ -n "$_pin_fid" ] && echo "$_pin_cap" | grep -q "n8n_manifest"; then
-  echo "  📌 مانيفست مثبّت!"
-  if dl_file "$_pin_fid" "$TMP/manifest.json" 3; then
-    if restore_from_manifest "$TMP/manifest.json"; then
-      exit 0
-    fi
-    echo "  ⚠️ فشل من المثبّت"
+  echo "  📌 مانيفست!"
+  if dl_file "$_pin_fid" "$TMP/m1.json" 3; then
+    restore_from_manifest "$TMP/m1.json" && exit 0
+    echo "  ⚠️ فشل"
   fi
 else
-  echo "  📭 لا يوجد"
+  echo "  📭 لا"
 fi
 
 # ════════════════════════════════════════════
-# طريقة 2: رسائل القناة
+# طريقة 2: رسائل
 # ════════════════════════════════════════════
 echo ""
-echo "🔍 [2/3] رسائل القناة..."
+echo "🔍 [2/3] رسائل..."
 
 _upd=$(curl -sS --max-time 20 \
   "${TG}/getUpdates?offset=-100&limit=100" 2>/dev/null || true)
-
 _fid2=""
-if [ -n "$_upd" ]; then
-  _fid2=$(echo "$_upd" | jq -r '
-    [.result[] |
-     select(
-       (.channel_post.document != null) and
-       ((.channel_post.caption // "") | test("n8n_manifest"))
-     )] |
-    sort_by(-.channel_post.date) |
-    .[0].channel_post.document.file_id // empty
-  ' 2>/dev/null || true)
-fi
+[ -n "$_upd" ] && _fid2=$(echo "$_upd" | jq -r '
+  [.result[] |
+   select((.channel_post.document != null) and
+          ((.channel_post.caption // "") | test("n8n_manifest")))] |
+  sort_by(-.channel_post.date) |
+  .[0].channel_post.document.file_id // empty
+' 2>/dev/null || true)
 
 if [ -n "$_fid2" ]; then
-  echo "  📋 وجدنا مانيفست!"
-  if dl_file "$_fid2" "$TMP/manifest2.json" 3; then
-    if restore_from_manifest "$TMP/manifest2.json"; then
-      exit 0
-    fi
-  fi
-else
-  echo "  📭 لا يوجد"
+  echo "  📋 مانيفست!"
+  dl_file "$_fid2" "$TMP/m2.json" 3 && \
+    restore_from_manifest "$TMP/m2.json" && exit 0
 fi
+echo "  📭 لا"
 
 # ════════════════════════════════════════════
-# طريقة 3: السجل المحلي
+# طريقة 3: محلي
 # ════════════════════════════════════════════
 echo ""
-echo "🔍 [3/3] السجل المحلي..."
+echo "🔍 [3/3] محلي..."
 
 _local=$(ls -t "$HIST"/*.json 2>/dev/null | head -1 || true)
 if [ -n "$_local" ] && [ -f "$_local" ]; then
   echo "  📂 $(basename "$_local")"
-  if restore_from_manifest "$_local"; then
-    exit 0
-  fi
-else
-  echo "  📭 لا يوجد"
+  restore_from_manifest "$_local" && exit 0
 fi
+echo "  📭 لا"
 
 echo ""
-echo "📭 لا توجد نسخة - n8n سيبدأ جديد"
+echo "📭 لا توجد نسخة"
 exit 0
