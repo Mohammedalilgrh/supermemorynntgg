@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 set -eu
 
 : "${TG_BOT_TOKEN:?}"
