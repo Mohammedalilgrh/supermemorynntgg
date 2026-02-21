@@ -1,9 +1,8 @@
-FROM alpine:3.20
+# Use official Node 20 Alpine - guaranteed >=20.19
+FROM node:20-alpine
 
-# Alpine 3.20 has Node.js 20.19+ which satisfies n8n requirements
+# Install system tools
 RUN apk add --no-cache \
-      nodejs \
-      npm \
       curl \
       jq \
       sqlite \
@@ -18,12 +17,13 @@ RUN apk add --no-cache \
       g++
 
 # Install n8n
-RUN npm install -g n8n@2.7.4 --no-audit --no-fund 2>&1 | tail -5
+RUN npm install -g n8n@latest --no-audit --no-fund 2>&1 | tail -3
 
-# Verify node version
-RUN node --version && n8n --version || true
+# Verify versions
+RUN echo "Node: $(node --version)" && \
+    echo "n8n: $(n8n --version)"
 
-# Create node user
+# Create node user if not exists
 RUN addgroup -g 1000 node 2>/dev/null || true && \
     adduser -u 1000 -G node -s /bin/sh -D node 2>/dev/null || true
 
@@ -43,6 +43,7 @@ ENV EXECUTIONS_DATA_PRUNE=true
 ENV EXECUTIONS_DATA_MAX_AGE=168
 ENV EXECUTIONS_DATA_SAVE_ON_SUCCESS=none
 ENV HOME=/home/node
+ENV N8N_RUNNERS_ENABLED=false
 
 USER node
 WORKDIR /home/node
