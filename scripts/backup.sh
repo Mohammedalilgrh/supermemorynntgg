@@ -30,6 +30,7 @@ TG="https://api.telegram.org/bot${TG_BOT_TOKEN}"
 
 mkdir -p "$WORK" "$HIST"
 
+# ── قفل ──
 mkdir "$LOCK" 2>/dev/null || exit 0
 trap 'rmdir "$LOCK" 2>/dev/null || true; rm -rf "$TMP" 2>/dev/null || true' EXIT
 
@@ -84,8 +85,8 @@ sqlite3 "$N8N_DIR/database.sqlite" \
 DB_SIZE=$(du -h "$TMP/db.sql.gz" | cut -f1)
 echo "  ✅ DB: $DB_SIZE"
 
-# ── أرشفة الإعدادات (بدون binaryData أبداً) ──
-echo "  📁 أرشفة الإعدادات..."
+# ── أرشفة الإعدادات (بدون binaryData) ──
+echo "  📁 إعدادات..."
 tar -C "$N8N_DIR" \
   --exclude='./database.sqlite' \
   --exclude='./database.sqlite-wal' \
@@ -97,13 +98,10 @@ tar -C "$N8N_DIR" \
   . 2>/dev/null || true
 
 FILES_SIZE="0"
-[ -s "$TMP/files.tar.gz" ] && \
-  FILES_SIZE=$(du -h "$TMP/files.tar.gz" | cut -f1)
-echo "  ✅ الإعدادات: $FILES_SIZE"
+[ -s "$TMP/files.tar.gz" ] && FILES_SIZE=$(du -h "$TMP/files.tar.gz" | cut -f1)
+echo "  ✅ إعدادات: $FILES_SIZE"
 
 # ── تقسيم ──
-echo "  ✂️ تقسيم..."
-
 _db_b=$(stat -c '%s' "$TMP/db.sql.gz" 2>/dev/null || echo 0)
 if [ "$_db_b" -gt "$CHUNK_BYTES" ]; then
   split -b "$CHUNK" -d -a 3 "$TMP/db.sql.gz" "$TMP/parts/db.sql.gz.part_"
@@ -122,15 +120,14 @@ if [ -s "$TMP/files.tar.gz" ]; then
   fi
 fi
 
-_total=$(du -sh "$TMP/parts" | cut -f1)
-_pcount=$(ls "$TMP/parts/" | wc -l)
-echo "  📊 $pcount ملفات - $_total إجمالي"
+_pcount=$(ls "$TMP/parts/" 2>/dev/null | wc -l)
+_total=$(du -sh "$TMP/parts" 2>/dev/null | cut -f1)
+echo "  📊 $_pcount ملف | $_total"
 
 # ── رفع ──
-echo "  📤 رفع إلى Telegram..."
+echo "  📤 رفع..."
 MANIFEST_FILES=""
 FILE_COUNT=0
-UPLOAD_OK=true
 
 for _fn in $(ls -v "$TMP/parts/"); do
   _fp="$TMP/parts/$_fn"
@@ -158,34 +155,30 @@ for _fn in $(ls -v "$TMP/parts/"); do
       echo "    ✅"
       break
     fi
-
     _try=$((_try + 1))
-    echo "    ⚠️ إعادة $_try/4"
+    echo "    ⚠️ $_try/4"
     sleep $((_try * 4))
   done
 
-  [ "$_done" = "true" ] || { UPLOAD_OK=false; break; }
+  [ "$_done" = "true" ] || { echo "❌ فشل"; exit 1; }
   sleep 2
 done
-
-[ "$UPLOAD_OK" = "true" ] || { echo "❌ فشل الرفع"; exit 1; }
 
 # ── مانيفست ──
 MANIFEST_FILES="${MANIFEST_FILES%,}"
 
 printf '{
-  "id": "%s",
-  "timestamp": "%s",
-  "type": "n8n-telegram-backup",
-  "version": "5.2",
-  "db_size": "%s",
-  "files_size": "%s",
-  "file_count": %s,
-  "binary_data": "false",
-  "files": [%s]
-}\n' \
-  "$ID" "$TS" "$DB_SIZE" "$FILES_SIZE" "$FILE_COUNT" \
-  "$MANIFEST_FILES" > "$TMP/manifest.json"
+  "id":"%s",
+  "timestamp":"%s",
+  "type":"n8n-telegram-backup",
+  "version":"6.0",
+  "db_size":"%s",
+  "files_size":"%s",
+  "file_count":%s,
+  "binary_data":"false",
+  "files":[%s]
+}\n' "$ID" "$TS" "$DB_SIZE" "$FILES_SIZE" "$FILE_COUNT" "$MANIFEST_FILES" \
+  > "$TMP/manifest.json"
 
 cp "$TMP/manifest.json" "$HIST/${ID}.json"
 
@@ -205,8 +198,7 @@ if [ "$_mok" = "true" ] && [ -n "$_mmid" ]; then
   curl -sS --max-time 15 -X POST "${TG}/pinChatMessage" \
     -d "chat_id=${TG_CHAT_ID}" \
     -d "message_id=${_mmid}" \
-    -d "disable_notification=true" \
-    >/dev/null 2>&1 || true
+    -d "disable_notification=true" >/dev/null 2>&1 || true
   echo "  ✅ مانيفست مثبّت"
 fi
 
@@ -214,6 +206,7 @@ _ts=$(date +%s)
 printf 'ID=%s\nTS=%s\nLE=%s\nLF=%s\nLD=%s\n' \
   "$ID" "$TS" "$_ts" "$_ts" "$(db_sig)" > "$STATE"
 
+# تنظيف
 ls -t "$HIST"/*.json 2>/dev/null | tail -n +21 | \
   xargs rm -f 2>/dev/null || true
 
