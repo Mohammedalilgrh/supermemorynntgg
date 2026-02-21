@@ -1,44 +1,21 @@
-FROM node:20-alpine
+FROM docker.n8n.io/n8nio/n8n:2.7.4
 
-RUN apk add --no-cache \
-      curl \
-      jq \
-      sqlite \
-      coreutils \
-      findutils \
-      bash \
-      tar \
-      gzip \
-      ca-certificates \
-      python3 \
-      make \
-      g++
+USER root
 
-RUN npm install -g n8n@latest --no-audit --no-fund 2>&1 | tail -3
+# Install tools natively to prevent exit code 127
+RUN apk update && \
+    apk add --no-cache curl jq sqlite tar gzip coreutils findutils ca-certificates tzdata
 
-RUN echo "Node: $(node --version) | n8n: $(n8n --version)"
-
-RUN addgroup -g 1000 nodeapp 2>/dev/null || true && \
-    adduser -u 1000 -G nodeapp -s /bin/sh -D nodeapp 2>/dev/null || true
-
-RUN mkdir -p /scripts /backup-data /backup-data/history /home/node/.n8n && \
+RUN mkdir -p /scripts /backup-data /home/node/.n8n && \
     chown -R node:node /home/node/.n8n /scripts /backup-data
 
 COPY --chown=node:node scripts/ /scripts/
 
-RUN find /scripts -name "*.sh" \
-      -exec sed -i 's/\r$//' {} \; \
-      -exec chmod 0755 {} \;
-
-ENV N8N_USER_FOLDER=/home/node/.n8n
-ENV GENERIC_TIMEZONE=Asia/Baghdad
-ENV N8N_DIAGNOSTICS_ENABLED=false
-ENV EXECUTIONS_DATA_PRUNE=true
-ENV EXECUTIONS_DATA_MAX_AGE=168
-ENV EXECUTIONS_DATA_SAVE_ON_SUCCESS=none
-ENV HOME=/home/node
+# Fix Windows line endings and make executable
+RUN sed -i 's/\r$//' /scripts/*.sh && \
+    chmod 0755 /scripts/*.sh
 
 USER node
 WORKDIR /home/node
 
-ENTRYPOINT ["bash", "/scripts/start.sh"]
+ENTRYPOINT ["sh", "/scripts/start.sh"]
