@@ -26,37 +26,30 @@ tg_msg() {
     >/dev/null 2>&1 || true
 }
 
-log "╔══════════════════════════════════════╗"
-log "║  n8n Smart Backup v6.0               ║"
-log "║  Node: $(node --version)                    ║"
-log "╚══════════════════════════════════════╝"
+log "=== n8n Backup v6.1 | Node: $(node --version) ==="
 
 # ══════════════════════════════════════════════
-# الاسترجاع أولاً قبل n8n
+# الاسترجاع
 # ══════════════════════════════════════════════
 if [ ! -s "$N8N_DIR/database.sqlite" ]; then
-  log "📦 لا توجد DB - استرجاع..."
-  tg_msg "🔄 <b>جاري استرجاع البيانات...</b>"
-
+  log "📦 استرجاع DB..."
+  tg_msg "🔄 <b>استرجاع...</b>"
   bash /scripts/restore.sh 2>&1 | sed 's/^/[restore] /' || true
 
   if [ -s "$N8N_DIR/database.sqlite" ]; then
-    _sz=$(du -h "$N8N_DIR/database.sqlite" | cut -f1)
-    log "✅ تم الاسترجاع: $_sz"
-    tg_msg "✅ <b>تم الاسترجاع!</b> حجم DB: $_sz"
+    log "✅ تم الاسترجاع"
+    tg_msg "✅ <b>تم الاسترجاع!</b>"
   else
     log "🆕 أول تشغيل"
-    tg_msg "🆕 <b>أول تشغيل - DB جديدة</b>"
+    tg_msg "🆕 <b>أول تشغيل</b>"
   fi
 else
-  _sz=$(du -h "$N8N_DIR/database.sqlite" | cut -f1)
-  log "✅ DB موجودة: $_sz"
+  log "✅ DB: $(du -h "$N8N_DIR/database.sqlite" | cut -f1)"
 fi
 
 # ══════════════════════════════════════════════
 # تشخيص
 # ══════════════════════════════════════════════
-log "=== تشخيص ==="
 if [ -s "$N8N_DIR/database.sqlite" ]; then
   _tc=$(sqlite3 "$N8N_DIR/database.sqlite" \
     "SELECT count(*) FROM sqlite_master WHERE type='table';" 2>/dev/null || echo 0)
@@ -64,36 +57,39 @@ if [ -s "$N8N_DIR/database.sqlite" ]; then
     "SELECT count(*) FROM \"user\";" 2>/dev/null || echo "?")
   _emails=$(sqlite3 "$N8N_DIR/database.sqlite" \
     "SELECT email FROM \"user\" LIMIT 5;" 2>/dev/null || echo "?")
-  _creds=$(sqlite3 "$N8N_DIR/database.sqlite" \
-    "SELECT count(*) FROM credentials_entity;" 2>/dev/null || echo "?")
-  _wf=$(sqlite3 "$N8N_DIR/database.sqlite" \
-    "SELECT count(*) FROM workflow_entity;" 2>/dev/null || echo "?")
   _setup=$(sqlite3 "$N8N_DIR/database.sqlite" \
     "SELECT value FROM settings WHERE key='userManagement.isInstanceOwnerSetUp';" 2>/dev/null || echo "?")
+  _role=$(sqlite3 "$N8N_DIR/database.sqlite" \
+    "SELECT role FROM \"user\" ORDER BY \"createdAt\" ASC LIMIT 1;" 2>/dev/null || echo "?")
+  _wf=$(sqlite3 "$N8N_DIR/database.sqlite" \
+    "SELECT count(*) FROM workflow_entity;" 2>/dev/null || echo "?")
+  _cred=$(sqlite3 "$N8N_DIR/database.sqlite" \
+    "SELECT count(*) FROM credentials_entity;" 2>/dev/null || echo "?")
 
-  log "📋 جداول: $_tc"
-  log "👤 مستخدمين: $_users | emails: $_emails"
-  log "🔑 credentials: $_creds | ⚙️ workflows: $_wf"
-  log "🔧 ownerSetUp: $_setup"
+  log "📋 tables:$_tc users:$_users emails:$_emails"
+  log "🔧 setup:$_setup role:$_role wf:$_wf cred:$_cred"
+  log "🔐 config: $(cat "$N8N_DIR/config" 2>/dev/null | head -c 40 || echo 'NONE')..."
+  log "🔐 encKey env: ${N8N_ENCRYPTION_KEY:+SET}${N8N_ENCRYPTION_KEY:-NOT SET}"
 
-  tg_msg "🔍 <b>تشخيص DB:</b>
+  tg_msg "🔍 <b>DB تشخيص:</b>
 📋 جداول: <code>$_tc</code>
 👤 مستخدمين: <code>$_users</code>
 📧 <code>$_emails</code>
-🔑 credentials: <code>$_creds</code>
-⚙️ workflows: <code>$_wf</code>
 🔧 ownerSetUp: <code>$_setup</code>
-🔐 encKey: <code>${N8N_ENCRYPTION_KEY:+SET}${N8N_ENCRYPTION_KEY:-NOT SET}</code>"
+👑 أول role: <code>$_role</code>
+⚙️ workflows: <code>$_wf</code>
+🔑 credentials: <code>$_cred</code>
+🔐 encKey: <code>${N8N_ENCRYPTION_KEY:+SET}${N8N_ENCRYPTION_KEY:-NOT}</code>
+📄 config: <code>$([ -f "$N8N_DIR/config" ] && echo YES || echo NO)</code>"
 fi
-log "=== نهاية التشخيص ==="
 
 # ══════════════════════════════════════════════
-# تشغيل n8n
+# n8n
 # ══════════════════════════════════════════════
-log "🚀 تشغيل n8n..."
+log "🚀 n8n..."
 n8n start &
 N8N_PID=$!
-log "✅ n8n PID: $N8N_PID"
+log "✅ PID: $N8N_PID"
 
 # ══════════════════════════════════════════════
 # خلفية
@@ -101,34 +97,24 @@ log "✅ n8n PID: $N8N_PID"
 (
   _w=0
   while [ "$_w" -lt 120 ]; do
-    curl -sf --max-time 2 \
-      "http://localhost:${N8N_PORT}/healthz" \
+    curl -sf --max-time 2 "http://localhost:${N8N_PORT}/healthz" \
       >/dev/null 2>&1 && break
-    sleep 3
-    _w=$((_w + 3))
+    sleep 3; _w=$((_w + 3))
   done
   log "[bg] ✅ n8n جاهز (${_w}s)"
-
-  tg_msg "🚀 <b>n8n شغّال!</b>
+  tg_msg "🚀 <b>n8n جاهز!</b>
 🌐 ${WEBHOOK_URL:-}
-🤖 /start للتحكم"
+🤖 /start"
 
-  log "[bg] 🤖 البوت..."
   while true; do
     bash /scripts/bot.sh 2>&1 | sed 's/^/[bot] /' || true
-    log "[bg] ⚠️ البوت توقف - إعادة 10s"
     sleep 10
   done
 ) &
 
-# ══════════════════════════════════════════════
-# مراقب الباك أب
-# ══════════════════════════════════════════════
 (
   sleep 120
-  log "[backup] 🔥 أولي..."
   bash /scripts/backup.sh 2>&1 | sed 's/^/[backup] /' || true
-
   while true; do
     sleep "$MONITOR_INTERVAL"
     [ -s "$N8N_DIR/database.sqlite" ] && \
@@ -136,9 +122,6 @@ log "✅ n8n PID: $N8N_PID"
   done
 ) &
 
-# ══════════════════════════════════════════════
-# Keep-Alive
-# ══════════════════════════════════════════════
 (
   while true; do
     sleep 200
@@ -147,17 +130,14 @@ log "✅ n8n PID: $N8N_PID"
   done
 ) &
 
-# ══════════════════════════════════════════════
-# مراقب n8n
-# ══════════════════════════════════════════════
-log "👀 مراقبة n8n..."
+log "👀 مراقبة..."
 while true; do
   sleep 5
   if ! kill -0 $N8N_PID 2>/dev/null; then
-    log "⚠️ n8n توقف - إعادة 5s..."
+    log "⚠️ n8n توقف"
     sleep 5
     n8n start &
     N8N_PID=$!
-    log "✅ n8n PID: $N8N_PID"
+    log "✅ PID: $N8N_PID"
   fi
 done
