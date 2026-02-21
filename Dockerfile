@@ -1,7 +1,5 @@
-# Use official Node 20 Alpine - guaranteed >=20.19
 FROM node:20-alpine
 
-# Install system tools
 RUN apk add --no-cache \
       curl \
       jq \
@@ -16,25 +14,27 @@ RUN apk add --no-cache \
       make \
       g++
 
-# Install n8n
+# Install n8n - latest stable that supports node 20
 RUN npm install -g n8n@latest --no-audit --no-fund 2>&1 | tail -3
 
-# Verify versions
-RUN echo "Node: $(node --version)" && \
-    echo "n8n: $(n8n --version)"
+# Verify
+RUN echo "=== Versions ===" && \
+    node --version && \
+    n8n --version
 
-# Create node user if not exists
+# User
 RUN addgroup -g 1000 node 2>/dev/null || true && \
     adduser -u 1000 -G node -s /bin/sh -D node 2>/dev/null || true
 
-# Directories
+# Dirs
 RUN mkdir -p /scripts /backup-data /backup-data/history /home/node/.n8n && \
     chown -R node:node /home/node/.n8n /scripts /backup-data
 
 COPY --chown=node:node scripts/ /scripts/
 
-RUN find /scripts -name "*.sh" -exec sed -i 's/\r$//' {} \; && \
-    find /scripts -name "*.sh" -exec chmod 0755 {} \;
+RUN find /scripts -name "*.sh" \
+      -exec sed -i 's/\r$//' {} \; \
+      -exec chmod 0755 {} \;
 
 ENV N8N_USER_FOLDER=/home/node/.n8n
 ENV GENERIC_TIMEZONE=Asia/Baghdad
