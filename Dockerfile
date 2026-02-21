@@ -16,10 +16,10 @@ RUN apk add --no-cache \
 
 RUN npm install -g n8n@latest --no-audit --no-fund 2>&1 | tail -3
 
-RUN echo "Node: $(node --version)" && n8n --version
+RUN echo "Node: $(node --version) | n8n: $(n8n --version)"
 
-RUN addgroup -g 1000 node 2>/dev/null || true && \
-    adduser -u 1000 -G node -s /bin/sh -D node 2>/dev/null || true
+RUN addgroup -g 1000 nodeapp 2>/dev/null || true && \
+    adduser -u 1000 -G nodeapp -s /bin/sh -D nodeapp 2>/dev/null || true
 
 RUN mkdir -p /scripts /backup-data /backup-data/history /home/node/.n8n && \
     chown -R node:node /home/node/.n8n /scripts /backup-data
