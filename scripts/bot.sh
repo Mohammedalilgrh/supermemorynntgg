@@ -86,7 +86,8 @@ do_backup_now() {
 
   if echo "$_out" | grep -q "اكتمل"; then
     _id=$(grep '^ID=' "$WORK/.backup_state" 2>/dev/null | cut -d= -f2 || echo "?")
-    send_keyboard "✅ تم! <code>$_id</code>" "$MAIN_MENU"
+    _sz=$(grep '^SZ=' "$WORK/.backup_state" 2>/dev/null | cut -d= -f2 || echo "?")
+    send_keyboard "✅ تم! <code>$_id</code> ($_sz)" "$MAIN_MENU"
   else
     send_keyboard "❌ فشل" "$MAIN_MENU"
   fi
@@ -97,33 +98,40 @@ do_cleanup() {
   [ -d "$N8N_DIR/binaryData" ] && \
     _before=$(du -sm "$N8N_DIR/binaryData" 2>/dev/null | cut -f1 || echo 0)
 
-  find "$N8N_DIR/binaryData" -type f -mmin +30 -delete 2>/dev/null || true
+  find "$N8N_DIR/binaryData" -type f -delete 2>/dev/null || true
   find "$N8N_DIR/binaryData" -type d -empty -delete 2>/dev/null || true
 
-  _after=0
-  [ -d "$N8N_DIR/binaryData" ] && \
-    _after=$(du -sm "$N8N_DIR/binaryData" 2>/dev/null | cut -f1 || echo 0)
+  # تنظيف سجلات الداتابيس
+  _db_before=$(du -h "$N8N_DIR/database.sqlite" 2>/dev/null | cut -f1 || echo "—")
+  sqlite3 "$N8N_DIR/database.sqlite" "
+    DELETE FROM execution_entity WHERE finished = 1;
+    DELETE FROM execution_data WHERE executionId NOT IN (SELECT id FROM execution_entity);
+    VACUUM;
+  " 2>/dev/null || true
+  _db_after=$(du -h "$N8N_DIR/database.sqlite" 2>/dev/null | cut -f1 || echo "—")
 
-  send_keyboard "🧹 <b>تنظيف</b>
+  send_keyboard "🧹 <b>تنظيف تم!</b>
 
-قبل: <code>${_before}MB</code>
-بعد: <code>${_after}MB</code>
-حرّرنا: <code>$((_before - _after))MB</code>" "$MAIN_MENU"
+📁 Binary: <code>${_before}MB → 0MB</code>
+🗄️ DB: <code>$_db_before → $_db_after</code>" "$MAIN_MENU"
 }
 
 do_info() {
   send_keyboard "ℹ️ <b>المعلومات</b>
 
-💡 النظام يحفظ بس <code>db.sql.gz</code>
+💡 يحفظ بس <code>db.sql.gz</code>
 = workflows + credentials + إعدادات
 
-📁 binaryData تتنظف تلقائياً
-= ما تتراكم ولا تأثر
+🧹 <b>تنظيف تلقائي:</b>
+  binaryData: كل 60 ثانية (أقدم من 3 دقائق)
+  سجلات DB: كل ساعة
+  
+📤 <b>باك أب:</b>
+  فحص كل 5 دقائق
+  أقل فترة: 10 دقائق
+  إجباري: كل 6 ساعات
 
-⏱️ باك أب إجباري كل 6 ساعات
-🔍 فحص تغييرات كل 30 ثانية
-
-📝 /start /status /backup" "$MAIN_MENU"
+📝 /start /status /backup /clean" "$MAIN_MENU"
 }
 
 echo "🤖 البوت جاهز..."
