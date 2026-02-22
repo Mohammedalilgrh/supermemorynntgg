@@ -36,6 +36,6 @@ if [ ! -s "$TMP/db.sql.gz" ]; then
   exit 0
 fi
 
-gunzip -c "$TMP/db.sql.gz" | sqlite3 "$N8N_DIR/database.sqlite"
+gzip -dc "$TMP/db.sql.gz" | sqlite3 "$N8N_DIR/database.sqlite"
 
 rm -rf "$TMP"
