@@ -5,7 +5,6 @@ services:
     dockerfilePath: ./Dockerfile
     plan: free
     envVars:
-      # ── Telegram ──
       - key: TG_BOT_TOKEN
         sync: false
       - key: TG_CHAT_ID
@@ -13,23 +12,26 @@ services:
       - key: TG_ADMIN_ID
         sync: false
 
-      # ── Backup ──
       - key: MONITOR_INTERVAL
-        value: "30"
+        value: "300"
       - key: MIN_BACKUP_INTERVAL_SEC
-        value: "30"
+        value: "600"
       - key: FORCE_BACKUP_EVERY_SEC
-        value: "900"
+        value: "21600"
       - key: CHUNK_SIZE
         value: "18M"
 
-      # ── n8n ──
       - key: EXECUTIONS_DATA_PRUNE
         value: "true"
       - key: EXECUTIONS_DATA_MAX_AGE
-        value: "168"
+        value: "1"
       - key: EXECUTIONS_DATA_SAVE_ON_SUCCESS
         value: "none"
+      - key: EXECUTIONS_DATA_SAVE_ON_ERROR
+        value: "all"
+      - key: EXECUTIONS_DATA_SAVE_MANUAL_EXECUTIONS
+        value: "false"
+
       - key: N8N_PORT
         value: "5678"
       - key: PORT
@@ -52,3 +54,7 @@ services:
         value: "Asia/Baghdad"
       - key: N8N_DIAGNOSTICS_ENABLED
         value: "false"
+      - key: N8N_DEFAULT_BINARY_DATA_MODE
+        value: "filesystem"
+      - key: N8N_BINARY_DATA_TTL
+        value: "1"
