@@ -28,55 +28,52 @@ echo "║  n8n + Telegram Backup (DB-only) v5.0        ║"
 echo "╚══════════════════════════════════════════════╝"
 echo ""
 
-# ── فحص الأدوات ──
-ALL_OK=true
-for cmd in curl jq sqlite3 gzip stat du awk cut tr; do
-  command -v "$cmd" >/dev/null 2>&1 || { echo "❌ $cmd"; ALL_OK=false; }
-done
-[ "$ALL_OK" = "true" ] || exit 1
-echo "✅ كل الأدوات موجودة"
-
-# ── فحص البوت ──
-BOT_OK=$(curl -sS "${TG}/getMe" | jq -r '.ok // "false"')
-BOT_NAME=$(curl -sS "${TG}/getMe" | jq -r '.result.username // "?"')
-if [ "$BOT_OK" = "true" ]; then
-  echo "✅ البوت: @${BOT_NAME}"
-else
-  echo "❌ فشل الاتصال بالبوت"
-  exit 1
-fi
-
-# ── الاسترجاع ──
+# ── الاسترجاع (سريع قبل n8n) ──
 if [ ! -s "$N8N_DIR/database.sqlite" ]; then
-  echo ""
-  echo "📦 لا توجد داتابيس - جاري الاسترجاع..."
-  tg_msg "🔄 <b>جاري استرجاع البيانات...</b>"
+  echo "📦 جاري الاسترجاع..."
+  sh /scripts/restore.sh 2>&1 || true
 
-  if sh /scripts/restore.sh 2>&1; then
-    if [ -s "$N8N_DIR/database.sqlite" ]; then
-      _tc=$(sqlite3 "$N8N_DIR/database.sqlite" \
-        "SELECT count(*) FROM sqlite_master WHERE type='table';" 2>/dev/null || echo 0)
-      echo "✅ تم الاسترجاع! ($_tc جدول)"
-      tg_msg "✅ <b>تم استرجاع البيانات!</b> ($_tc جدول)"
-    else
-      echo "🆕 أول تشغيل"
-      tg_msg "🆕 <b>أول تشغيل - لا توجد نسخة سابقة</b>"
-    fi
+  if [ -s "$N8N_DIR/database.sqlite" ]; then
+    echo "✅ تم الاسترجاع!"
   else
-    echo "🆕 أول تشغيل - لا نسخة سابقة"
+    echo "🆕 أول تشغيل"
   fi
 else
-  _tc=$(sqlite3 "$N8N_DIR/database.sqlite" \
-    "SELECT count(*) FROM sqlite_master WHERE type='table';" 2>/dev/null || echo 0)
-  echo "✅ الداتابيس موجودة ($_tc جدول)"
+  echo "✅ الداتابيس موجودة"
 fi
-echo ""
 
-# ── البوت التفاعلي ──
+# ── كل شي ثاني بالخلفية بعد n8n يشتغل ──
 (
-  sleep 10
-  echo "[bot] 🤖 البوت التفاعلي شغّال"
+  # ننتظر n8n يشتغل
+  echo "[bg] ⏳ ننتظر n8n..."
+  _wait=0
+  while [ "$_wait" -lt 120 ]; do
+    if curl -sS -o /dev/null "http://localhost:${N8N_PORT:-5678}/healthz" 2>/dev/null; then
+      echo "[bg] ✅ n8n شغّال!"
+      break
+    fi
+    sleep 3
+    _wait=$((_wait + 3))
+  done
+
+  tg_msg "🚀 <b>n8n شغّال!</b> أرسل /start للتحكم"
+
+  # البوت
   sh /scripts/bot.sh 2>&1 | sed 's/^/[bot] /' &
+
+  # أول باك أب
+  sleep 15
+  if [ -s "$N8N_DIR/database.sqlite" ]; then
+    rm -f "$WORK/.backup_state"
+    sh /scripts/backup.sh 2>&1 | sed 's/^/[backup] /' || true
+  fi
+
+  # مراقب الباك أب
+  while true; do
+    sleep "$MONITOR_INTERVAL"
+    [ -s "$N8N_DIR/database.sqlite" ] && \
+      sh /scripts/backup.sh 2>&1 | sed 's/^/[backup] /' || true
+  done
 ) &
 
 # ── Keep-Alive ──
@@ -88,25 +85,6 @@ echo ""
     sleep 300
   done
 ) &
-
-# ── مراقب الباك أب ──
-(
-  sleep 45
-  if [ -s "$N8N_DIR/database.sqlite" ]; then
-    echo "[backup] 🔥 باك أب أولي"
-    rm -f "$WORK/.backup_state"
-    sh /scripts/backup.sh 2>&1 | sed 's/^/[backup] /' || true
-  fi
-
-  while true; do
-    sleep "$MONITOR_INTERVAL"
-    [ -s "$N8N_DIR/database.sqlite" ] && \
-      sh /scripts/backup.sh 2>&1 | sed 's/^/[backup] /' || true
-  done
-) &
-
-tg_msg "🚀 <b>n8n شغّال الآن!</b>
-🤖 أرسل /start للتحكم"
 
 echo "🚀 تشغيل n8n..."
 exec n8n start
