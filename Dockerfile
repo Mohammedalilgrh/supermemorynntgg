@@ -9,8 +9,11 @@ RUN apt-get update && \
 RUN mkdir -p /scripts /home/node/.n8n && \
     chown -R node:node /home/node/.n8n /scripts
 
-COPY --chown=node:node scripts/ /scripts/
-RUN chmod +x /scripts/*.sh
+COPY scripts/ /scripts/
+
+RUN chmod +x /scripts/backup.sh && \
+    chmod +x /scripts/restore.sh && \
+    chmod +x /scripts/start.sh
 
 USER node
 WORKDIR /home/node
