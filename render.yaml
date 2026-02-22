@@ -21,12 +21,13 @@ services:
       - key: EXECUTIONS_DATA_MAX_AGE
         value: "24"
       - key: EXECUTIONS_DATA_PRUNE_MAX_COUNT
-        value: "200"
+        value: "100"
       - key: EXECUTIONS_DATA_SAVE_ON_SUCCESS
         value: "none"
-
-      - key: N8N_DEFAULT_BINARY_DATA_MODE
-        value: "filesystem"
+      - key: EXECUTIONS_DATA_SAVE_ON_ERROR
+        value: "none"
+      - key: EXECUTIONS_DATA_SAVE_MANUAL_EXECUTIONS
+        value: "false"
 
       - key: N8N_PORT
         value: "5678"
