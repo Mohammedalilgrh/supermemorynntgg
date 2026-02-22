@@ -9,8 +9,7 @@ USER root
 COPY --from=tools /usr/bin/curl /usr/bin/curl
 COPY --from=tools /usr/bin/jq /usr/bin/jq
 COPY --from=tools /usr/bin/sqlite3 /usr/bin/sqlite3
-COPY --from=tools /usr/bin/gzip /usr/bin/gzip
-COPY --from=tools /usr/bin/gunzip /usr/bin/gunzip
+COPY --from=tools /bin/gzip /usr/bin/gzip
 COPY --from=tools /etc/ssl/certs /etc/ssl/certs
 
 RUN mkdir -p /scripts /home/node/.n8n && \
