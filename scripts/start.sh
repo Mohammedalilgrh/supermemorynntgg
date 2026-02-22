@@ -24,11 +24,11 @@ tg_msg() {
 
 echo ""
 echo "╔══════════════════════════════════════════════╗"
-echo "║  n8n + Telegram Backup v5.1 (DB-only)        ║"
+echo "║  n8n + Telegram Backup v5.2                   ║"
 echo "╚══════════════════════════════════════════════╝"
 echo ""
 
-# ── الاسترجاع السريع ──
+# ── الاسترجاع ──
 if [ ! -s "$N8N_DIR/database.sqlite" ]; then
   echo "📦 جاري الاسترجاع..."
   sh /scripts/restore.sh 2>&1 || true
@@ -44,18 +44,13 @@ else
   echo "✅ الداتابيس موجودة"
 fi
 
-# ── تنظيف binaryData القديمة عند كل تشغيل ──
-if [ -d "$N8N_DIR/binaryData" ]; then
-  _bsize=$(du -sm "$N8N_DIR/binaryData" 2>/dev/null | cut -f1 || echo 0)
-  echo "🧹 تنظيف binaryData ($_bsize MB)..."
-  rm -rf "$N8N_DIR/binaryData"
-  mkdir -p "$N8N_DIR/binaryData"
-  echo "✅ تم التنظيف"
-fi
-
+# ── تنظيف عند التشغيل ──
+rm -rf "$N8N_DIR/binaryData" 2>/dev/null || true
+mkdir -p "$N8N_DIR/binaryData"
+echo "🧹 binaryData نظيف"
 echo ""
 
-# ── كل شي ثاني بالخلفية ──
+# ── الخلفية ──
 (
   _wait=0
   while [ "$_wait" -lt 120 ]; do
@@ -66,19 +61,16 @@ echo ""
     _wait=$((_wait + 3))
   done
 
-  tg_msg "🚀 <b>n8n شغّال!</b> أرسل /start للتحكم"
+  tg_msg "🚀 <b>n8n شغّال!</b> أرسل /start"
 
-  # البوت
   sh /scripts/bot.sh 2>&1 | sed 's/^/[bot] /' &
 
-  # أول باك أب
   sleep 15
   if [ -s "$N8N_DIR/database.sqlite" ]; then
     rm -f "$WORK/.backup_state"
     sh /scripts/backup.sh 2>&1 | sed 's/^/[backup] /' || true
   fi
 
-  # مراقب الباك أب
   while true; do
     sleep "$MONITOR_INTERVAL"
     [ -s "$N8N_DIR/database.sqlite" ] && \
@@ -96,18 +88,18 @@ echo ""
   done
 ) &
 
-# ── تنظيف binaryData دوري (كل 6 ساعات) ──
+# ══════════════════════════════════════
+# ⭐ التنظيف التلقائي - كل 60 ثانية
+# ══════════════════════════════════════
 (
+  sleep 60
   while true; do
-    sleep 21600
     if [ -d "$N8N_DIR/binaryData" ]; then
-      _bs=$(du -sm "$N8N_DIR/binaryData" 2>/dev/null | cut -f1 || echo 0)
-      if [ "$_bs" -gt 50 ]; then
-        echo "[cleanup] 🧹 binaryData: ${_bs}MB → تنظيف"
-        find "$N8N_DIR/binaryData" -type f -mmin +60 -delete 2>/dev/null || true
-        find "$N8N_DIR/binaryData" -type d -empty -delete 2>/dev/null || true
-      fi
+      # أمسح كل ملف عمره أكثر من 3 دقائق
+      find "$N8N_DIR/binaryData" -type f -mmin +3 -delete 2>/dev/null || true
+      find "$N8N_DIR/binaryData" -type d -empty -delete 2>/dev/null || true
     fi
+    sleep 60
   done
 ) &
 
