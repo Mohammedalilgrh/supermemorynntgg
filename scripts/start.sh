@@ -112,13 +112,13 @@ echo ""
 # الملفات الجديدة (قاعد تشتغل) تبقى
 # ══════════════════════════════════════
 (
-  sleep 60
+  sleep 200
   while true; do
     if [ -d "$N8N_DIR/binaryData" ]; then
-      find "$N8N_DIR/binaryData" -type f -mmin +3 -delete 2>/dev/null || true
+      find "$N8N_DIR/binaryData" -type f -mmin +10 -delete 2>/dev/null || true
       find "$N8N_DIR/binaryData" -type d -empty -delete 2>/dev/null || true
     fi
-    sleep 60
+    sleep 200
   done
 ) &
 
