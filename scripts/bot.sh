@@ -11,10 +11,6 @@ WORK="${WORK:-/backup-data}"
 TG="https://api.telegram.org/bot${TG_BOT_TOKEN}"
 OFFSET=0
 
-# ══════════════════════════════
-# دوال الإرسال
-# ══════════════════════════════
-
 send_msg() {
   curl -sS -X POST "${TG}/sendMessage" \
     -H "Content-Type: application/json" \
@@ -26,15 +22,13 @@ send_msg() {
 }
 
 send_keyboard() {
-  _text="$1"
-  _kb="$2"
   curl -sS -X POST "${TG}/sendMessage" \
     -H "Content-Type: application/json" \
     -d "{
       \"chat_id\": ${TG_ADMIN_ID},
-      \"text\": \"$_text\",
+      \"text\": \"$1\",
       \"parse_mode\": \"HTML\",
-      \"reply_markup\": $_kb
+      \"reply_markup\": $2
     }" 2>/dev/null || true
 }
 
@@ -44,116 +38,93 @@ answer_callback() {
     -d "text=${2:-}" >/dev/null 2>&1 || true
 }
 
-# ══════════════════════════════
-# القائمة الرئيسية
-# ══════════════════════════════
-
 MAIN_MENU='{
   "inline_keyboard": [
-    [{"text": "📊 حالة النظام", "callback_data": "status"}],
-    [{"text": "💾 حفظ الآن!", "callback_data": "backup_now"}],
+    [{"text": "📊 الحالة", "callback_data": "status"}],
+    [{"text": "💾 حفظ الآن", "callback_data": "backup_now"}],
+    [{"text": "🧹 تنظيف", "callback_data": "cleanup"}],
     [{"text": "ℹ️ معلومات", "callback_data": "info"}]
   ]
 }'
 
 show_main() {
-  send_keyboard "🤖 <b>لوحة التحكم - n8n Backup</b>
+  send_keyboard "🤖 <b>لوحة التحكم</b>
 
-اختار العملية:" "$MAIN_MENU"
+اختار:" "$MAIN_MENU"
 }
-
-# ══════════════════════════════
-# حالة النظام
-# ══════════════════════════════
 
 do_status() {
   _db="$N8N_DIR/database.sqlite"
-  _db_size="لا يوجد"
-  _db_tables=0
-  _db_time="—"
-  _last_bkp="لا يوجد"
-  _last_time="—"
-  _last_size="—"
+  _db_size="—"; _db_tables=0; _bin_size="0"
+  _last_bkp="—"; _last_size="—"
 
-  if [ -f "$_db" ]; then
+  [ -f "$_db" ] && {
     _db_size=$(du -h "$_db" 2>/dev/null | cut -f1)
     _db_tables=$(sqlite3 "$_db" "SELECT count(*) FROM sqlite_master WHERE type='table';" 2>/dev/null || echo 0)
-    _ts=$(stat -c '%Y' "$_db" 2>/dev/null || echo 0)
-    _db_time=$(date -d "@$_ts" "+%Y-%m-%d %H:%M" 2>/dev/null || date -u "+%Y-%m-%d %H:%M")
-  fi
+  }
 
-  if [ -f "$WORK/.backup_state" ]; then
+  [ -d "$N8N_DIR/binaryData" ] && \
+    _bin_size=$(du -sm "$N8N_DIR/binaryData" 2>/dev/null | cut -f1 || echo 0)
+
+  [ -f "$WORK/.backup_state" ] && {
     _last_bkp=$(grep '^ID=' "$WORK/.backup_state" 2>/dev/null | cut -d= -f2 || echo "—")
-    _last_time=$(grep '^TS=' "$WORK/.backup_state" 2>/dev/null | cut -d= -f2 || echo "—")
     _last_size=$(grep '^SZ=' "$WORK/.backup_state" 2>/dev/null | cut -d= -f2 || echo "—")
-  fi
+  }
 
-  send_keyboard "📊 <b>حالة النظام</b>
+  send_keyboard "📊 <b>الحالة</b>
 
-🗄️ <b>قاعدة البيانات:</b>
-  📦 الحجم: <code>$_db_size</code>
-  📋 الجداول: <code>$_db_tables</code>
-  🕒 آخر تعديل: <code>$_db_time</code>
-
-💾 <b>آخر باك أب:</b>
-  📌 <code>$_last_bkp</code>
-  🕒 <code>$_last_time</code>
-  📦 <code>$_last_size</code>
-
-⏰ الآن: <code>$(date -u '+%Y-%m-%d %H:%M:%S UTC')</code>" "$MAIN_MENU"
+🗄️ DB: <code>$_db_size</code> ($_db_tables جدول)
+📁 Binary: <code>${_bin_size}MB</code>
+💾 آخر باك أب: <code>$_last_bkp</code> ($_last_size)
+⏰ <code>$(date -u '+%H:%M:%S UTC')</code>" "$MAIN_MENU"
 }
-
-# ══════════════════════════════
-# حفظ فوري
-# ══════════════════════════════
 
 do_backup_now() {
-  send_msg "⏳ <b>جاري الحفظ...</b>"
-
+  send_msg "⏳ جاري الحفظ..."
   rm -f "$WORK/.backup_state"
-  _output=$(sh /scripts/backup.sh 2>&1 || true)
+  _out=$(sh /scripts/backup.sh 2>&1 || true)
 
-  if echo "$_output" | grep -q "اكتمل"; then
+  if echo "$_out" | grep -q "اكتمل"; then
     _id=$(grep '^ID=' "$WORK/.backup_state" 2>/dev/null | cut -d= -f2 || echo "?")
-    _sz=$(grep '^SZ=' "$WORK/.backup_state" 2>/dev/null | cut -d= -f2 || echo "?")
-    send_keyboard "✅ <b>تم الحفظ!</b>
-
-🆔 <code>$_id</code>
-📦 <code>$_sz</code>" "$MAIN_MENU"
+    send_keyboard "✅ تم! <code>$_id</code>" "$MAIN_MENU"
   else
-    send_keyboard "❌ <b>فشل الحفظ</b>
-
-<pre>$(echo "$_output" | tail -5)</pre>" "$MAIN_MENU"
+    send_keyboard "❌ فشل" "$MAIN_MENU"
   fi
 }
 
-# ══════════════════════════════
-# معلومات
-# ══════════════════════════════
+do_cleanup() {
+  _before=0
+  [ -d "$N8N_DIR/binaryData" ] && \
+    _before=$(du -sm "$N8N_DIR/binaryData" 2>/dev/null | cut -f1 || echo 0)
 
-do_info() {
-  send_keyboard "ℹ️ <b>معلومات النظام</b>
+  find "$N8N_DIR/binaryData" -type f -mmin +30 -delete 2>/dev/null || true
+  find "$N8N_DIR/binaryData" -type d -empty -delete 2>/dev/null || true
 
-🌐 <b>n8n:</b> <code>https://${N8N_HOST:-localhost}</code>
-📱 <b>Channel:</b> <code>${TG_CHAT_ID}</code>
+  _after=0
+  [ -d "$N8N_DIR/binaryData" ] && \
+    _after=$(du -sm "$N8N_DIR/binaryData" 2>/dev/null | cut -f1 || echo 0)
 
-⏱️ <b>إعدادات:</b>
-  فحص كل: <code>${MONITOR_INTERVAL:-30}s</code>
-  إجباري كل: <code>${FORCE_BACKUP_EVERY_SEC:-900}s</code>
-  حجم القطعة: <code>${CHUNK_SIZE:-18M}</code>
+  send_keyboard "🧹 <b>تنظيف</b>
 
-💡 <b>النظام يحفظ بس db.sql.gz</b>
-  = كل الـ workflows + credentials + إعدادات
-
-📝 <b>الأوامر:</b>
-  /start - القائمة
-  /status - الحالة
-  /backup - حفظ فوري" "$MAIN_MENU"
+قبل: <code>${_before}MB</code>
+بعد: <code>${_after}MB</code>
+حرّرنا: <code>$((_before - _after))MB</code>" "$MAIN_MENU"
 }
 
-# ══════════════════════════════
-# حلقة الاستماع
-# ══════════════════════════════
+do_info() {
+  send_keyboard "ℹ️ <b>المعلومات</b>
+
+💡 النظام يحفظ بس <code>db.sql.gz</code>
+= workflows + credentials + إعدادات
+
+📁 binaryData تتنظف تلقائياً
+= ما تتراكم ولا تأثر
+
+⏱️ باك أب إجباري كل 6 ساعات
+🔍 فحص تغييرات كل 30 ثانية
+
+📝 /start /status /backup" "$MAIN_MENU"
+}
 
 echo "🤖 البوت جاهز..."
 
@@ -171,7 +142,6 @@ while true; do
     _uid=$(echo "$update" | jq -r '.update_id' 2>/dev/null)
     OFFSET=$((_uid + 1))
 
-    # ── رسالة نصية ──
     _text=$(echo "$update" | jq -r '.message.text // empty' 2>/dev/null)
     _from=$(echo "$update" | jq -r '.message.from.id // 0' 2>/dev/null)
 
@@ -181,21 +151,21 @@ while true; do
         /status) do_status ;;
         /backup|/save) do_backup_now ;;
         /info|/help) do_info ;;
+        /clean*) do_cleanup ;;
       esac
     fi
 
-    # ── Callback ──
     _cb_id=$(echo "$update" | jq -r '.callback_query.id // empty' 2>/dev/null)
     _cb_data=$(echo "$update" | jq -r '.callback_query.data // empty' 2>/dev/null)
     _cb_from=$(echo "$update" | jq -r '.callback_query.from.id // 0' 2>/dev/null)
 
     if [ -n "$_cb_id" ] && [ "$_cb_from" = "$TG_ADMIN_ID" ]; then
       answer_callback "$_cb_id" "⏳"
-
       case "$_cb_data" in
         main) show_main ;;
         status) do_status ;;
         backup_now) do_backup_now ;;
+        cleanup) do_cleanup ;;
         info) do_info ;;
       esac
     fi
