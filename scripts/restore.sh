@@ -1,151 +1,167 @@
 #!/bin/sh
-set -eu
-umask 077
+set -e
 
-: "${TG_BOT_TOKEN:?}"
-: "${TG_CHAT_ID:?}"
+TG_BOT_TOKEN="${TG_BOT_TOKEN:-}"
+TG_CHAT_ID="${TG_CHAT_ID:-}"
 
-N8N_DIR="${N8N_DIR:-/home/node/.n8n}"
-WORK="${WORK:-/backup-data}"
-HIST="$WORK/history"
-
-TG="https://api.telegram.org/bot${TG_BOT_TOKEN}"
-TMP="/tmp/restore-$$"
-
-trap 'rm -rf "$TMP" 2>/dev/null || true' EXIT
-mkdir -p "$N8N_DIR" "$WORK" "$HIST" "$TMP"
-
-[ -s "$N8N_DIR/database.sqlite" ] && { echo "✅ DB موجودة"; exit 0; }
-
-echo "=== 🔍 البحث عن آخر باك أب ==="
-
-# ── دالة تحميل ملف ──
-dl_file() {
-  _fid="$1"; _out="$2"
-  _path=$(curl -sS "${TG}/getFile?file_id=${_fid}" \
-    | jq -r '.result.file_path // empty' 2>/dev/null)
-  [ -n "$_path" ] || return 1
-  curl -sS -o "$_out" \
-    "https://api.telegram.org/file/bot${TG_BOT_TOKEN}/${_path}"
-  [ -s "$_out" ]
-}
-
-# ── دالة الاسترجاع من مانيفست ──
-restore_from_manifest() {
-  _mfile="$1"
-  _bid=$(jq -r '.id // "?"' "$_mfile" 2>/dev/null)
-  echo "  📋 باك أب: $_bid"
-
-  _rdir="$TMP/data"
-  rm -rf "$_rdir"; mkdir -p "$_rdir"
-
-  _all_ok=true
-  jq -r '.files[] | "\(.file_id)|\(.name)"' "$_mfile" 2>/dev/null | \
-  while IFS='|' read -r _fid _fn; do
-    [ -n "$_fid" ] || continue
-    echo "    📥 $_fn..."
-
-    _try=0
-    while [ "$_try" -lt 3 ]; do
-      if dl_file "$_fid" "$_rdir/$_fn"; then
-        echo "      ✅"
-        break
-      fi
-      _try=$((_try + 1))
-      sleep 2
-    done
-
-    [ -s "$_rdir/$_fn" ] || touch "$_rdir/.failed"
-    sleep 1
-  done
-
-  [ ! -f "$_rdir/.failed" ] || { echo "  ❌ فشل التحميل"; return 1; }
-
-  # استرجاع DB
-  if ls "$_rdir"/db.sql.gz.part_* >/dev/null 2>&1; then
-    cat "$_rdir"/db.sql.gz.part_* | gzip -dc | sqlite3 "$N8N_DIR/database.sqlite"
-  elif [ -f "$_rdir/db.sql.gz" ]; then
-    gzip -dc "$_rdir/db.sql.gz" | sqlite3 "$N8N_DIR/database.sqlite"
-  else
-    echo "  ❌ لا ملفات DB"
-    return 1
-  fi
-
-  if [ ! -s "$N8N_DIR/database.sqlite" ]; then
-    echo "  ❌ DB فارغة"
-    rm -f "$N8N_DIR/database.sqlite"
-    return 1
-  fi
-
-  _tc=$(sqlite3 "$N8N_DIR/database.sqlite" \
-    "SELECT count(*) FROM sqlite_master WHERE type='table';" 2>/dev/null || echo 0)
-  [ "$_tc" -gt 0 ] || { rm -f "$N8N_DIR/database.sqlite"; return 1; }
-  echo "  ✅ $_tc جدول"
-
-  # استرجاع الملفات
-  if ls "$_rdir"/files.tar.gz.part_* >/dev/null 2>&1; then
-    cat "$_rdir"/files.tar.gz.part_* | gzip -dc | tar -C "$N8N_DIR" -xf - 2>/dev/null || true
-  elif [ -f "$_rdir/files.tar.gz" ]; then
-    gzip -dc "$_rdir/files.tar.gz" | tar -C "$N8N_DIR" -xf - 2>/dev/null || true
-  fi
-
-  # حفظ المانيفست بالتاريخ
-  cp "$_mfile" "$HIST/${_bid}.json" 2>/dev/null || true
-
-  rm -rf "$_rdir"
-  echo "  🎉 استرجاع ناجح!"
-  return 0
-}
-
-# ════════════════════════════════
-# الطريقة 1: الرسالة المثبّتة
-# ════════════════════════════════
-echo ""
-echo "🔍 [1/2] البحث عن رسالة مثبّتة..."
-
-PINNED=$(curl -sS "${TG}/getChat?chat_id=${TG_CHAT_ID}" 2>/dev/null)
-_pin_fid=$(echo "$PINNED" | jq -r '.result.pinned_message.document.file_id // empty' 2>/dev/null)
-_pin_cap=$(echo "$PINNED" | jq -r '.result.pinned_message.caption // ""' 2>/dev/null)
-
-if [ -n "$_pin_fid" ] && echo "$_pin_cap" | grep -q "n8n_manifest"; then
-  echo "  📌 لقينا مانيفست مثبّت!"
-  if dl_file "$_pin_fid" "$TMP/manifest.json"; then
-    if restore_from_manifest "$TMP/manifest.json"; then
-      exit 0
-    fi
-  fi
-fi
-echo "  📭 لا يوجد"
-
-# ════════════════════════════════
-# الطريقة 2: البحث في الرسائل
-# ════════════════════════════════
-echo ""
-echo "🔍 [2/2] البحث في آخر الرسائل..."
-
-# نبحث عن رسائل فيها n8n_manifest
-# نستخدم search في القناة
-_search_resp=$(curl -sS "${TG}/getUpdates?offset=-50&limit=50" 2>/dev/null || true)
-
-if [ -n "$_search_resp" ]; then
-  # نبحث عن أي document فيه n8n_manifest
-  _found_fid=$(echo "$_search_resp" | jq -r '
-    [.result[] |
-      select(.channel_post.document != null) |
-      select(.channel_post.caption // "" | contains("n8n_manifest"))
-    ] | sort_by(-.channel_post.date) | .[0].channel_post.document.file_id // empty
-  ' 2>/dev/null || true)
-
-  if [ -n "$_found_fid" ]; then
-    echo "  📋 لقينا مانيفست!"
-    if dl_file "$_found_fid" "$TMP/manifest2.json"; then
-      if restore_from_manifest "$TMP/manifest2.json"; then
-        exit 0
-      fi
-    fi
-  fi
+if [ -z "$TG_BOT_TOKEN" ] || [ -z "$TG_CHAT_ID" ]; then
+  echo "Missing TG credentials"
+  exit 0
 fi
 
-echo ""
-echo "📭 لا توجد نسخة احتياطية"
-exit 1
+N8N_DIR="/home/node/.n8n"
+TMP="/tmp/restore_$$"
+
+mkdir -p "$TMP" "$N8N_DIR"
+
+echo "Looking for pinned backup..."
+
+# Download using Node.js
+node << 'NODESCRIPT'
+const https = require('https');
+const fs = require('fs');
+const zlib = require('zlib');
+
+const token = process.env.TG_BOT_TOKEN;
+const chatId = process.env.TG_CHAT_ID;
+const tmpDir = process.env.TMP;
+const n8nDir = process.env.N8N_DIR;
+
+function httpsGet(url) {
+  return new Promise((resolve, reject) => {
+    https.get(url, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        return httpsGet(res.headers.location).then(resolve).catch(reject);
+      }
+      let data = [];
+      res.on('data', chunk => data.push(chunk));
+      res.on('end', () => resolve(Buffer.concat(data)));
+      res.on('error', reject);
+    }).on('error', reject);
+  });
+}
+
+async function main() {
+  console.log('Getting chat info...');
+  
+  const chatInfo = await httpsGet('https://api.telegram.org/bot' + token + '/getChat?chat_id=' + chatId);
+  const chatData = JSON.parse(chatInfo.toString());
+  
+  if (!chatData.ok) {
+    console.log('Failed to get chat info');
+    process.exit(1);
+  }
+  
+  if (!chatData.result.pinned_message) {
+    console.log('No pinned message found');
+    process.exit(0);
+  }
+  
+  if (!chatData.result.pinned_message.document) {
+    console.log('Pinned message has no document');
+    process.exit(0);
+  }
+  
+  const fileId = chatData.result.pinned_message.document.file_id;
+  const fileName = chatData.result.pinned_message.document.file_name || 'backup';
+  
+  console.log('Found pinned file:', fileName);
+  
+  console.log('Getting file path...');
+  const fileInfo = await httpsGet('https://api.telegram.org/bot' + token + '/getFile?file_id=' + fileId);
+  const fileData = JSON.parse(fileInfo.toString());
+  
+  if (!fileData.ok || !fileData.result.file_path) {
+    console.log('Could not get file path');
+    process.exit(1);
+  }
+  
+  console.log('Downloading backup...');
+  const fileContent = await httpsGet('https://api.telegram.org/file/bot' + token + '/' + fileData.result.file_path);
+  
+  console.log('Downloaded', fileContent.length, 'bytes');
+  
+  // Check if it's gzipped
+  const isGzip = fileContent[0] === 0x1f && fileContent[1] === 0x8b;
+  
+  let sqlData;
+  if (isGzip) {
+    console.log('Decompressing...');
+    sqlData = zlib.gunzipSync(fileContent);
+  } else {
+    sqlData = fileContent;
+  }
+  
+  // Check if it's SQL dump or raw SQLite
+  const isSqlDump = sqlData.toString('utf8', 0, 100).includes('PRAGMA') || 
+                    sqlData.toString('utf8', 0, 100).includes('CREATE') ||
+                    sqlData.toString('utf8', 0, 100).includes('INSERT');
+  
+  if (isSqlDump) {
+    console.log('SQL dump detected, writing to temp file...');
+    fs.writeFileSync(tmpDir + '/dump.sql', sqlData);
+    console.log('SQLDUMP');
+  } else {
+    console.log('Raw SQLite file detected...');
+    fs.writeFileSync(n8nDir + '/database.sqlite', sqlData);
+    console.log('RAWDB');
+  }
+  
+  console.log('Restore complete!');
+  process.exit(0);
+}
+
+main().catch(err => {
+  console.error('Error:', err.message);
+  process.exit(1);
+});
+NODESCRIPT
+
+RESULT=$?
+
+# If SQL dump was created, import it
+if [ -f "$TMP/dump.sql" ]; then
+  echo "Importing SQL dump..."
+  
+  # Use node to run sqlite commands
+  node << 'SQLSCRIPT'
+const { execSync } = require('child_process');
+const fs = require('fs');
+const path = require('path');
+
+const tmpDir = process.env.TMP;
+const n8nDir = process.env.N8N_DIR;
+const dumpFile = path.join(tmpDir, 'dump.sql');
+const dbFile = path.join(n8nDir, 'database.sqlite');
+
+// Remove existing db
+if (fs.existsSync(dbFile)) {
+  fs.unlinkSync(dbFile);
+}
+
+// Read and execute SQL
+const sql = fs.readFileSync(dumpFile, 'utf8');
+
+// Use better-sqlite3 which is included in n8n
+try {
+  const Database = require('better-sqlite3');
+  const db = new Database(dbFile);
+  db.exec(sql);
+  db.close();
+  console.log('Database imported successfully!');
+} catch (e) {
+  console.log('Error importing:', e.message);
+  process.exit(1);
+}
+SQLSCRIPT
+fi
+
+rm -rf "$TMP"
+
+# Verify database
+if [ -s "$N8N_DIR/database.sqlite" ]; then
+  echo "✅ Database restored!"
+else
+  echo "❌ Database restore failed"
+  exit 1
+fi
