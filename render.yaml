@@ -10,8 +10,6 @@ services:
         sync: false
       - key: TG_CHAT_ID
         sync: false
-      - key: TG_ADMIN_ID
-        sync: false
       - key: N8N_ENCRYPTION_KEY
         sync: false
 
