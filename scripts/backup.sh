@@ -9,7 +9,7 @@ N8N_DIR="${N8N_DIR:-/home/node/.n8n}"
 WORK="${WORK:-/backup-data}"
 
 MIN_INT="${MIN_BACKUP_INTERVAL_SEC:-30}"
-FORCE_INT="${FORCE_BACKUP_EVERY_SEC:-900}"
+FORCE_INT="${FORCE_BACKUP_EVERY_SEC:-21600}"
 GZIP_LVL="${GZIP_LEVEL:-1}"
 CHUNK="${CHUNK_SIZE:-18M}"
 CHUNK_BYTES=18874368
@@ -64,7 +64,7 @@ echo "└───────────────────────�
 
 rm -rf "$TMP"; mkdir -p "$TMP/parts"
 
-# ── تصدير DB ──
+# ── تصدير DB فقط ──
 echo "  🗄️ تصدير الداتابيس..."
 sqlite3 "$N8N_DIR/database.sqlite" ".timeout 10000" \
   "PRAGMA wal_checkpoint(TRUNCATE);" >/dev/null 2>&1 || true
@@ -78,22 +78,20 @@ echo "  ✅ DB: $DB_SIZE"
 
 # ── تقسيم لو كبير ──
 _db_bytes=$(stat -c '%s' "$TMP/db.sql.gz" 2>/dev/null || echo 0)
-SPLIT_MODE="no"
 if [ "$_db_bytes" -gt "$CHUNK_BYTES" ]; then
-  echo "  ✂️ تقسيم ($DB_SIZE > 18M)..."
+  echo "  ✂️ تقسيم..."
   split -b "$CHUNK" -d -a 3 "$TMP/db.sql.gz" "$TMP/parts/db.sql.gz.part_"
   rm -f "$TMP/db.sql.gz"
-  SPLIT_MODE="yes"
 else
   mv "$TMP/db.sql.gz" "$TMP/parts/db.sql.gz"
 fi
 
 # ── رفع لـ Telegram ──
-echo "  📤 رفع إلى Telegram..."
+echo "  📤 رفع..."
 
 FILE_COUNT=0
 UPLOAD_OK=true
-FIRST_MSG_ID=""
+LAST_MSG_ID=""
 
 for f in "$TMP/parts"/*; do
   [ -f "$f" ] || continue
@@ -114,13 +112,12 @@ for f in "$TMP/parts"/*; do
     if [ "$_rok" = "true" ] && [ -n "$_mid" ]; then
       _ok_flag="yes"
       FILE_COUNT=$((FILE_COUNT + 1))
-      [ -z "$FIRST_MSG_ID" ] && FIRST_MSG_ID="$_mid"
+      LAST_MSG_ID="$_mid"
       echo "    ✅ $_fn ($_fs)"
       break
     fi
 
     _try=$((_try + 1))
-    echo "    ⚠️ إعادة $_try/3..."
     sleep 3
   done
 
@@ -128,18 +125,13 @@ for f in "$TMP/parts"/*; do
   sleep 1
 done
 
-[ "$UPLOAD_OK" = "true" ] || { echo "  ❌ فشل الرفع"; exit 1; }
+[ "$UPLOAD_OK" = "true" ] || { echo "  ❌ فشل"; exit 1; }
 
-# ── تثبيت آخر رسالة ──
-if [ -n "$FIRST_MSG_ID" ]; then
-  # لو ملف واحد (db.sql.gz) نثبته مباشرة
-  # لو مقسم نثبت أول جزء
-  _pin_mid="$FIRST_MSG_ID"
-
-  # لو ملف واحد بدون تقسيم - هذا هو db.sql.gz المثبت
+# ── تثبيت ──
+if [ -n "$LAST_MSG_ID" ]; then
   curl -sS -X POST "${TG}/pinChatMessage" \
     -d "chat_id=${TG_CHAT_ID}" \
-    -d "message_id=${_pin_mid}" \
+    -d "message_id=${LAST_MSG_ID}" \
     -d "disable_notification=true" >/dev/null 2>&1 || true
   echo "  📌 مثبّت!"
 fi
@@ -153,14 +145,8 @@ LF=$(date +%s)
 LD=$(db_sig)
 FC=$FILE_COUNT
 SZ=$DB_SIZE
-SPLIT=$SPLIT_MODE
 EOF
 
 rm -rf "$TMP"
-
-echo ""
-echo "┌─────────────────────────────────────┐"
-echo "│ ✅ اكتمل! $TS_LABEL                 │"
-echo "│ 📦 DB: $DB_SIZE ($FILE_COUNT ملف)    │"
-echo "└─────────────────────────────────────┘"
+echo "  ✅ اكتمل! DB: $DB_SIZE"
 exit 0
