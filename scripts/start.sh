@@ -5,15 +5,11 @@ N8N_DIR="/home/node/.n8n"
 
 mkdir -p "$N8N_DIR"
 
-# Restore if needed
+# Restore if empty
 if [ ! -s "$N8N_DIR/database.sqlite" ]; then
   sh /scripts/restore.sh || true
 fi
 
-# Start bot
-sh /scripts/bot.sh &
-
-# Start n8n
 n8n start &
 N8N_PID=$!
 
