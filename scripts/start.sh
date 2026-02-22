@@ -1,109 +1,53 @@
 #!/bin/sh
-set -eu
-umask 077
+set -e
 
-N8N_DIR="${N8N_DIR:-/home/node/.n8n}"
-WORK="${WORK:-/backup-data}"
-MONITOR_INTERVAL="${MONITOR_INTERVAL:-30}"
+N8N_DIR="/home/node/.n8n"
 
-mkdir -p "$N8N_DIR" "$WORK" "$WORK/history"
-export HOME="/home/node"
-
-: "${TG_BOT_TOKEN:?Set TG_BOT_TOKEN}"
-: "${TG_CHAT_ID:?Set TG_CHAT_ID}"
-: "${TG_ADMIN_ID:?Set TG_ADMIN_ID}"
-
-TG="https://api.telegram.org/bot${TG_BOT_TOKEN}"
-
-tg_msg() {
-  curl -sS -X POST "${TG}/sendMessage" \
-    -d "chat_id=${TG_ADMIN_ID}" \
-    -d "parse_mode=HTML" \
-    -d "text=$1" >/dev/null 2>&1 || true
-}
+mkdir -p "$N8N_DIR"
 
 echo ""
 echo "╔══════════════════════════════════════════════╗"
-echo "║  n8n + Telegram Smart Backup v4.0            ║"
+echo "║  n8n + Telegram Backup System                ║"
 echo "╚══════════════════════════════════════════════╝"
 echo ""
 
-# ── فحص الأدوات ──
-ALL_OK=true
-for cmd in curl jq sqlite3 tar gzip split sha256sum \
-           stat du sort awk xargs find cut tr; do
-  command -v "$cmd" >/dev/null 2>&1 || { echo "❌ $cmd"; ALL_OK=false; }
-done
-[ "$ALL_OK" = "true" ] || exit 1
-echo "✅ كل الأدوات موجودة"
-
-# ── فحص البوت ──
-BOT_OK=$(curl -sS "${TG}/getMe" | jq -r '.ok // "false"')
-BOT_NAME=$(curl -sS "${TG}/getMe" | jq -r '.result.username // "?"')
-if [ "$BOT_OK" = "true" ]; then
-  echo "✅ البوت: @${BOT_NAME}"
-else
-  echo "❌ فشل الاتصال بالبوت"
-  exit 1
-fi
-
-# ── الاسترجاع ──
+# Restore if no database
 if [ ! -s "$N8N_DIR/database.sqlite" ]; then
-  echo ""
-  echo "📦 لا توجد داتابيس - جاري الاسترجاع..."
-  tg_msg "🔄 <b>جاري استرجاع البيانات...</b>"
-
-  if sh /scripts/restore.sh 2>&1; then
-    if [ -s "$N8N_DIR/database.sqlite" ]; then
-      echo "✅ تم الاسترجاع!"
-      tg_msg "✅ <b>تم استرجاع البيانات بنجاح!</b>"
-    else
-      echo "🆕 أول تشغيل"
-      tg_msg "🆕 <b>أول تشغيل - لا توجد نسخة سابقة</b>"
-    fi
-  else
-    echo "🆕 أول تشغيل"
-  fi
-else
-  echo "✅ الداتابيس موجودة"
+  echo "📦 No database found - restoring from Telegram..."
+  sh /scripts/restore.sh || echo "No backup found, starting fresh"
 fi
+
+if [ -s "$N8N_DIR/database.sqlite" ]; then
+  echo "✅ Database ready!"
+else
+  echo "🆕 Starting with fresh database"
+fi
+
 echo ""
 
-# ── البوت التفاعلي ──
-(
-  sleep 10
-  echo "[bot] 🤖 البوت التفاعلي شغّال"
-  sh /scripts/bot.sh 2>&1 | sed 's/^/[bot] /' &
-) &
+# Start bot in background
+if [ -n "$TG_BOT_TOKEN" ] && [ -n "$TG_ADMIN_ID" ]; then
+  echo "🤖 Starting Telegram bot..."
+  sh /scripts/bot.sh &
+fi
 
-# ── Keep-Alive ──
-(
-  sleep 60
-  while true; do
-    curl -sS -o /dev/null \
-      "http://localhost:${N8N_PORT:-5678}/healthz" 2>/dev/null || true
-    sleep 300
-  done
-) &
+echo "🚀 Starting n8n..."
 
-# ── مراقب الباك أب ──
-(
-  sleep 45
-  if [ -s "$N8N_DIR/database.sqlite" ]; then
-    echo "[backup] 🔥 باك أب فوري"
-    rm -f "$WORK/.backup_state"
-    sh /scripts/backup.sh 2>&1 | sed 's/^/[backup] /' || true
-  fi
+# Start n8n in background
+n8n start &
+N8N_PID=$!
 
-  while true; do
-    sleep "$MONITOR_INTERVAL"
-    [ -s "$N8N_DIR/database.sqlite" ] && \
-      sh /scripts/backup.sh 2>&1 | sed 's/^/[backup] /' || true
-  done
-) &
+# Backup on shutdown
+shutdown() {
+  echo ""
+  echo "🛑 Shutdown detected - creating backup..."
+  sh /scripts/backup.sh || true
+  kill -TERM $N8N_PID 2>/dev/null
+  wait $N8N_PID 2>/dev/null
+  exit 0
+}
 
-tg_msg "🚀 <b>n8n شغّال الآن!</b>
-🤖 أرسل /start للتحكم"
+trap shutdown SIGTERM SIGINT
 
-echo "🚀 تشغيل n8n..."
-exec n8n start
+# Wait for n8n
+wait $N8N_PID
