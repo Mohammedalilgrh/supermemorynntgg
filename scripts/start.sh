@@ -112,16 +112,15 @@ echo ""
 # الملفات الجديدة (قاعد تشتغل) تبقى
 # ══════════════════════════════════════
 (
-  sleep 200
+  sleep 600
   while true; do
     if [ -d "$N8N_DIR/binaryData" ]; then
       find "$N8N_DIR/binaryData" -type f -mmin +10 -delete 2>/dev/null || true
       find "$N8N_DIR/binaryData" -type d -empty -delete 2>/dev/null || true
     fi
-    sleep 200
+    sleep 600
   done
 ) &
-
 # ══════════════════════════════════════
 # ⭐ تنظيف سجلات الداتابيس كل ساعة
 # يمسح سجلات التنفيذات القديمة
