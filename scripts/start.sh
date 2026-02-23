@@ -24,7 +24,7 @@ tg_msg() {
 
 echo ""
 echo "╔══════════════════════════════════════════════╗"
-echo "║  n8n + Telegram Backup v5.4 LIGHT              ║"
+echo "║  n8n + Telegram Backup v5.4 FINAL              ║"
 echo "╚══════════════════════════════════════════════╝"
 echo ""
 
@@ -44,7 +44,7 @@ else
   echo "✅ الداتابيس موجودة"
 fi
 
-# ── تنظيف عند التشغيل (مرة وحدة) ──
+# ── تنظيف عند التشغيل (مرة وحدة - VACUUM هنا بس) ──
 rm -rf "$N8N_DIR/binaryData" 2>/dev/null || true
 mkdir -p "$N8N_DIR/binaryData"
 
@@ -78,14 +78,12 @@ echo ""
 
   sh /scripts/bot.sh 2>&1 | sed 's/^/[bot] /' &
 
-  # أول باك أب
   sleep 30
   if [ -s "$N8N_DIR/database.sqlite" ]; then
     rm -f "$WORK/.backup_state"
     sh /scripts/backup.sh 2>&1 | sed 's/^/[backup] /' || true
   fi
 
-  # فحص كل دقيقتين
   while true; do
     sleep "$MONITOR_INTERVAL"
     [ -s "$N8N_DIR/database.sqlite" ] && \
@@ -106,13 +104,12 @@ echo ""
 ) &
 
 # ══════════════════════════════════════
-# ⭐ تنظيف واحد خفيف كل 10 دقائق
-# بدون VACUUM (خفيف على RAM)
+# ⭐ تنظيف binaryData كل 10 دقائق
+# خفيف - بدون VACUUM - بدون DB
 # ══════════════════════════════════════
 (
   sleep 600
   while true; do
-    # تنظيف binaryData
     if [ -d "$N8N_DIR/binaryData" ]; then
       find "$N8N_DIR/binaryData" -type f -mmin +10 -delete 2>/dev/null || true
       find "$N8N_DIR/binaryData" -type d -empty -delete 2>/dev/null || true
