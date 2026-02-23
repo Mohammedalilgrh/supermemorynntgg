@@ -8,7 +8,7 @@ umask 077
 N8N_DIR="${N8N_DIR:-/home/node/.n8n}"
 WORK="${WORK:-/backup-data}"
 
-MIN_INT="${MIN_BACKUP_INTERVAL_SEC:-600}"
+MIN_INT="${MIN_BACKUP_INTERVAL_SEC:-120}"
 FORCE_INT="${FORCE_BACKUP_EVERY_SEC:-21600}"
 GZIP_LVL="${GZIP_LEVEL:-1}"
 CHUNK="${CHUNK_SIZE:-18M}"
@@ -22,11 +22,9 @@ TG="https://api.telegram.org/bot${TG_BOT_TOKEN}"
 
 mkdir -p "$WORK"
 
-# ── القفل ──
 if ! mkdir "$LOCK" 2>/dev/null; then exit 0; fi
 trap 'rmdir "$LOCK" 2>/dev/null; rm -rf "$TMP" 2>/dev/null' EXIT
 
-# ── كشف التغيير ──
 db_sig() {
   _s=""
   for _f in database.sqlite database.sqlite-wal database.sqlite-shm; do
@@ -64,29 +62,31 @@ echo "└───────────────────────�
 
 rm -rf "$TMP"; mkdir -p "$TMP/parts"
 
-# ── تصدير DB فقط ──
-echo "  🗄️ تصدير الداتابيس..."
+# تنظيف سجلات قبل التصدير (خفيف بدون VACUUM)
+sqlite3 "$N8N_DIR/database.sqlite" "
+  DELETE FROM execution_entity WHERE finished = 1;
+  DELETE FROM execution_data WHERE executionId NOT IN (SELECT id FROM execution_entity);
+" 2>/dev/null || true
+
+echo "  🗄️ تصدير..."
 sqlite3 "$N8N_DIR/database.sqlite" ".timeout 10000" \
   "PRAGMA wal_checkpoint(TRUNCATE);" >/dev/null 2>&1 || true
 
 sqlite3 "$N8N_DIR/database.sqlite" ".timeout 10000" ".dump" 2>/dev/null \
   | gzip -n -"$GZIP_LVL" -c > "$TMP/db.sql.gz"
 
-[ -s "$TMP/db.sql.gz" ] || { echo "  ❌ فشل التصدير"; exit 1; }
+[ -s "$TMP/db.sql.gz" ] || { echo "  ❌ فشل"; exit 1; }
 DB_SIZE=$(du -h "$TMP/db.sql.gz" | cut -f1)
 echo "  ✅ DB: $DB_SIZE"
 
-# ── تقسيم لو كبير ──
 _db_bytes=$(stat -c '%s' "$TMP/db.sql.gz" 2>/dev/null || echo 0)
 if [ "$_db_bytes" -gt "$CHUNK_BYTES" ]; then
-  echo "  ✂️ تقسيم..."
   split -b "$CHUNK" -d -a 3 "$TMP/db.sql.gz" "$TMP/parts/db.sql.gz.part_"
   rm -f "$TMP/db.sql.gz"
 else
   mv "$TMP/db.sql.gz" "$TMP/parts/db.sql.gz"
 fi
 
-# ── رفع لـ Telegram ──
 echo "  📤 رفع..."
 
 FILE_COUNT=0
@@ -127,7 +127,6 @@ done
 
 [ "$UPLOAD_OK" = "true" ] || { echo "  ❌ فشل"; exit 1; }
 
-# ── تثبيت ──
 if [ -n "$LAST_MSG_ID" ]; then
   curl -sS -X POST "${TG}/pinChatMessage" \
     -d "chat_id=${TG_CHAT_ID}" \
@@ -136,7 +135,6 @@ if [ -n "$LAST_MSG_ID" ]; then
   echo "  📌 مثبّت!"
 fi
 
-# ── حفظ الحالة ──
 cat > "$STATE" <<EOF
 ID=$TS_LABEL
 TS=$TS_ISO
