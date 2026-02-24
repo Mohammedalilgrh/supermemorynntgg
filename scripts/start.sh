@@ -45,8 +45,8 @@ else
 fi
 
 # ── تنظيف عند التشغيل (مرة وحدة - VACUUM هنا بس) ──
-rm -rf "$N8N_DIR/binaryData" 2>/dev/null || true
-mkdir -p "$N8N_DIR/binaryData"
+rm -rf "$N8N_DIR/storage" "$N8N_DIR/binaryData" 2>/dev/null || true
+mkdir -p "$N8N_DIR/storage"
 
 if [ -s "$N8N_DIR/database.sqlite" ]; then
   _before=$(du -h "$N8N_DIR/database.sqlite" | cut -f1)
@@ -104,12 +104,18 @@ echo ""
 ) &
 
 # ══════════════════════════════════════
-# ⭐ تنظيف binaryData كل 10 دقائق
+# ⭐ تنظيف storage كل 10 دقائق
 # خفيف - بدون VACUUM - بدون DB
 # ══════════════════════════════════════
 (
   sleep 600
   while true; do
+    # تنظيف storage (الاسم الجديد)
+    if [ -d "$N8N_DIR/storage" ]; then
+      find "$N8N_DIR/storage" -type f -mmin +10 -delete 2>/dev/null || true
+      find "$N8N_DIR/storage" -type d -empty -delete 2>/dev/null || true
+    fi
+    # تنظيف binaryData (لو n8n لسه يستخدمه)
     if [ -d "$N8N_DIR/binaryData" ]; then
       find "$N8N_DIR/binaryData" -type f -mmin +10 -delete 2>/dev/null || true
       find "$N8N_DIR/binaryData" -type d -empty -delete 2>/dev/null || true
