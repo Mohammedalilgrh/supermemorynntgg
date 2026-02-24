@@ -13,7 +13,7 @@ RUN apk add --no-cache \
         [ -f "$p" ] && cp "$p" /toolbox/ || true; \
     done
 
-FROM docker.n8n.io/n8nio/n8n:2.9.2
+FROM docker.n8n.io/n8nio/n8n:2.9.1
 
 USER root
 
