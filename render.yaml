@@ -58,3 +58,5 @@ services:
         value: "filesystem"
       - key: N8N_BINARY_DATA_TTL
         value: "1"
+      - key: N8N_MIGRATE_FS_STORAGE_PATH
+        value: "true"
