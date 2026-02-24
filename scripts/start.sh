@@ -24,7 +24,7 @@ tg_msg() {
 
 echo ""
 echo "╔══════════════════════════════════════════════╗"
-echo "║  n8n + Telegram Backup v5.4 FINAL              ║"
+echo "║  n8n + Telegram Backup v5.5 FIXED              ║"
 echo "╚══════════════════════════════════════════════╝"
 echo ""
 
@@ -44,10 +44,7 @@ else
   echo "✅ الداتابيس موجودة"
 fi
 
-# ── تنظيف عند التشغيل (مرة وحدة - VACUUM هنا بس) ──
-rm -rf "$N8N_DIR/storage" "$N8N_DIR/binaryData" 2>/dev/null || true
-mkdir -p "$N8N_DIR/storage"
-
+# ── تنظيف DB عند التشغيل فقط ──
 if [ -s "$N8N_DIR/database.sqlite" ]; then
   _before=$(du -h "$N8N_DIR/database.sqlite" | cut -f1)
   sqlite3 "$N8N_DIR/database.sqlite" "
@@ -100,27 +97,6 @@ echo ""
     curl -sS -o /dev/null \
       "http://localhost:${N8N_PORT:-5678}/healthz" 2>/dev/null || true
     sleep 300
-  done
-) &
-
-# ══════════════════════════════════════
-# ⭐ تنظيف storage كل 10 دقائق
-# خفيف - بدون VACUUM - بدون DB
-# ══════════════════════════════════════
-(
-  sleep 600
-  while true; do
-    # تنظيف storage (الاسم الجديد)
-    if [ -d "$N8N_DIR/storage" ]; then
-      find "$N8N_DIR/storage" -type f -mmin +10 -delete 2>/dev/null || true
-      find "$N8N_DIR/storage" -type d -empty -delete 2>/dev/null || true
-    fi
-    # تنظيف binaryData (لو n8n لسه يستخدمه)
-    if [ -d "$N8N_DIR/binaryData" ]; then
-      find "$N8N_DIR/binaryData" -type f -mmin +10 -delete 2>/dev/null || true
-      find "$N8N_DIR/binaryData" -type d -empty -delete 2>/dev/null || true
-    fi
-    sleep 600
   done
 ) &
 
