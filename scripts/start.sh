@@ -4,7 +4,7 @@ umask 077
 
 N8N_DIR="${N8N_DIR:-/home/node/.n8n}"
 WORK="${WORK:-/backup-data}"
-MONITOR_INTERVAL="${MONITOR_INTERVAL:-120}"
+MONITOR_INTERVAL="${MONITOR_INTERVAL:-300}"
 
 mkdir -p "$N8N_DIR" "$WORK"
 export HOME="/home/node"
@@ -24,7 +24,7 @@ tg_msg() {
 
 echo ""
 echo "╔══════════════════════════════════════════════╗"
-echo "║  n8n + Telegram Backup v5.5 FIXED              ║"
+echo "║  n8n + Telegram Backup v5.2 FINAL             ║"
 echo "╚══════════════════════════════════════════════╝"
 echo ""
 
@@ -44,8 +44,14 @@ else
   echo "✅ الداتابيس موجودة"
 fi
 
-# ── تنظيف DB عند التشغيل فقط ──
+# ── تنظيف عند التشغيل ──
+rm -rf "$N8N_DIR/binaryData" 2>/dev/null || true
+mkdir -p "$N8N_DIR/binaryData"
+echo "🧹 binaryData نظيف"
+
+# ── تنظيف سجلات الداتابيس ──
 if [ -s "$N8N_DIR/database.sqlite" ]; then
+  echo "🗄️ تنظيف سجلات قديمة..."
   _before=$(du -h "$N8N_DIR/database.sqlite" | cut -f1)
   sqlite3 "$N8N_DIR/database.sqlite" "
     DELETE FROM execution_entity WHERE finished = 1;
@@ -53,13 +59,13 @@ if [ -s "$N8N_DIR/database.sqlite" ]; then
     VACUUM;
   " 2>/dev/null || true
   _after=$(du -h "$N8N_DIR/database.sqlite" | cut -f1)
-  echo "🧹 DB: $_before → $_after"
+  echo "✅ DB: $_before → $_after"
 fi
 
 echo ""
 
 # ══════════════════════════════════════
-# بوت + باك أب
+# الخلفية: بوت + باك أب
 # ══════════════════════════════════════
 (
   _wait=0
@@ -97,6 +103,41 @@ echo ""
     curl -sS -o /dev/null \
       "http://localhost:${N8N_PORT:-5678}/healthz" 2>/dev/null || true
     sleep 300
+  done
+) &
+
+# ══════════════════════════════════════
+# ⭐ تنظيف binaryData كل 60 ثانية
+# ملفات أقدم من 3 دقائق تنمسح
+# الملفات الجديدة (قاعد تشتغل) تبقى
+# ══════════════════════════════════════
+(
+  sleep 600
+  while true; do
+    if [ -d "$N8N_DIR/binaryData" ]; then
+      find "$N8N_DIR/binaryData" -type f -mmin +10 -delete 2>/dev/null || true
+      find "$N8N_DIR/binaryData" -type d -empty -delete 2>/dev/null || true
+    fi
+    sleep 600
+  done
+) &
+# ══════════════════════════════════════
+# ⭐ تنظيف سجلات الداتابيس كل ساعة
+# يمسح سجلات التنفيذات القديمة
+# يبقي الداتابيس صغيرة دائماً
+# ══════════════════════════════════════
+(
+  sleep 3600
+  while true; do
+    if [ -s "$N8N_DIR/database.sqlite" ]; then
+      sqlite3 "$N8N_DIR/database.sqlite" "
+        DELETE FROM execution_entity WHERE finished = 1;
+        DELETE FROM execution_data WHERE executionId NOT IN (SELECT id FROM execution_entity);
+        VACUUM;
+      " 2>/dev/null || true
+      echo "[db-clean] 🗄️ تم تنظيف السجلات"
+    fi
+    sleep 3600
   done
 ) &
 
