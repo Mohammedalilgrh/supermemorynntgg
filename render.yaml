@@ -24,7 +24,7 @@ services:
       - key: EXECUTIONS_DATA_PRUNE
         value: "true"
       - key: EXECUTIONS_DATA_MAX_AGE
-        value: "10"
+        value: "1"
       - key: EXECUTIONS_DATA_SAVE_ON_SUCCESS
         value: "none"
       - key: EXECUTIONS_DATA_SAVE_ON_ERROR
@@ -54,9 +54,3 @@ services:
         value: "Asia/Baghdad"
       - key: N8N_DIAGNOSTICS_ENABLED
         value: "false"
-      - key: N8N_DEFAULT_BINARY_DATA_MODE
-        value: "filesystem"
-      - key: N8N_BINARY_DATA_TTL
-        value: "10"
-      - key: N8N_MIGRATE_FS_STORAGE_PATH
-        value: "true"
