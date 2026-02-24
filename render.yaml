@@ -25,8 +25,6 @@ services:
         value: "true"
       - key: EXECUTIONS_DATA_MAX_AGE
         value: "10"
-      - key: N8N_BINARY_DATA_TTL
-        value: "10"
       - key: EXECUTIONS_DATA_SAVE_ON_SUCCESS
         value: "none"
       - key: EXECUTIONS_DATA_SAVE_ON_ERROR
@@ -59,4 +57,8 @@ services:
       - key: N8N_DEFAULT_BINARY_DATA_MODE
         value: "filesystem"
       - key: N8N_BINARY_DATA_TTL
-        value: "1"
+        value: "10"
+      - key: N8N_RUNNERS_ENABLED
+        value: "false"
+      - key: EXECUTIONS_PROCESS
+        value: "main"
