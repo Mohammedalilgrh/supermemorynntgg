@@ -13,9 +13,9 @@ services:
         sync: false
 
       - key: MONITOR_INTERVAL
-        value: "120"
+        value: "300"
       - key: MIN_BACKUP_INTERVAL_SEC
-        value: "120"
+        value: "600"
       - key: FORCE_BACKUP_EVERY_SEC
         value: "21600"
       - key: CHUNK_SIZE
@@ -24,7 +24,9 @@ services:
       - key: EXECUTIONS_DATA_PRUNE
         value: "true"
       - key: EXECUTIONS_DATA_MAX_AGE
-        value: "1"
+        value: "10"
+      - key: N8N_BINARY_DATA_TTL
+        value: "10"
       - key: EXECUTIONS_DATA_SAVE_ON_SUCCESS
         value: "none"
       - key: EXECUTIONS_DATA_SAVE_ON_ERROR
@@ -54,3 +56,7 @@ services:
         value: "Asia/Baghdad"
       - key: N8N_DIAGNOSTICS_ENABLED
         value: "false"
+      - key: N8N_DEFAULT_BINARY_DATA_MODE
+        value: "filesystem"
+      - key: N8N_BINARY_DATA_TTL
+        value: "1"
