@@ -19,6 +19,8 @@ FROM docker.n8n.io/n8nio/n8n:2.6.2
 
 USER root
 
+RUN apk add --no-cache ffmpeg python3
+
 COPY --from=tools /toolbox/        /usr/local/bin/
 COPY --from=tools /usr/lib/        /usr/local/lib/
 COPY --from=tools /lib/            /usr/local/lib2/
@@ -30,10 +32,6 @@ ENV PATH="/usr/local/bin:$PATH"
 RUN mkdir -p /scripts /backup-data /home/node/.n8n && \
     chown -R node:node /home/node/.n8n /scripts /backup-data
 
-# ══════════════════════════════════════
-# ⭐ Install community nodes here
-# Add any node you need
-# ══════════════════════════════════════
 USER node
 
 RUN cd /home/node/.n8n && \
@@ -41,10 +39,6 @@ RUN cd /home/node/.n8n && \
     cd nodes && \
     npm init -y 2>/dev/null && \
     npm install @mookielianhd/n8n-nodes-instagram 2>/dev/null || true
-
-# Add more nodes like this:
-# RUN cd /home/node/.n8n/nodes && \
-#     npm install n8n-nodes-some-other-node 2>/dev/null || true
 
 USER root
 
@@ -55,5 +49,4 @@ RUN sed -i 's/\r$//' /scripts/*.sh && \
 
 USER node
 WORKDIR /home/node
-
 ENTRYPOINT ["sh", "/scripts/start.sh"]
