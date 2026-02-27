@@ -2,7 +2,7 @@ FROM alpine:3.20 AS tools
 
 RUN apk add --no-cache \
       curl jq sqlite tar gzip \
-      \ffmbeg
+      ffmpeg \
       coreutils findutils ca-certificates && \
     mkdir -p /toolbox && \
     for cmd in curl jq sqlite3 split sha256sum \
