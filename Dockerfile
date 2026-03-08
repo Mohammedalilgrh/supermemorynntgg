@@ -1,7 +1,7 @@
 FROM alpine:3.20 AS tools
 
 RUN apk add --no-cache \
-      curl jq sqlite tar gzip \
+      curl jq sqlite tar gzip xz \
       coreutils findutils ca-certificates && \
     mkdir -p /toolbox && \
     for cmd in curl jq sqlite3 split sha256sum \
@@ -13,18 +13,16 @@ RUN apk add --no-cache \
         [ -f "$p" ] && cp "$p" /toolbox/ || true; \
     done
 
+# تحميل ffmpeg static في مرحلة Alpine
+RUN curl -L -o /tmp/ffmpeg.tar.xz https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz && \
+    tar -xJf /tmp/ffmpeg.tar.xz -C /tmp/ && \
+    cp /tmp/ffmpeg-*-static/ffmpeg /toolbox/ && \
+    cp /tmp/ffmpeg-*-static/ffprobe /toolbox/ && \
+    rm -rf /tmp/ffmpeg-*-static /tmp/ffmpeg.tar.xz
+
 FROM docker.n8n.io/n8nio/n8n:2.6.2
 
 USER root
-
-# تنزيل ffmpeg static
-RUN apk add --no-cache curl xz && \
-    curl -L -o /tmp/ffmpeg.tar.xz https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz && \
-    tar -xJf /tmp/ffmpeg.tar.xz -C /tmp/ && \
-    cp /tmp/ffmpeg-*-static/ffmpeg /usr/local/bin/ && \
-    cp /tmp/ffmpeg-*-static/ffprobe /usr/local/bin/ && \
-    rm -rf /tmp/ffmpeg-*-static /tmp/ffmpeg.tar.xz && \
-    apk del xz
 
 COPY --from=tools /toolbox/        /usr/local/bin/
 COPY --from=tools /usr/lib/        /usr/local/lib/
