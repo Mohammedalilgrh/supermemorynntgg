@@ -17,13 +17,8 @@ FROM docker.n8n.io/n8nio/n8n:2.6.2
 
 USER root
 
-# تنزيل ffmpeg static
-RUN curl -L -o /tmp/ffmpeg.tar.xz https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz && \
-    tar -xJf /tmp/ffmpeg.tar.xz -C /tmp/ && \
-    cp /tmp/ffmpeg-*-static/ffmpeg /usr/local/bin/ && \
-    cp /tmp/ffmpeg-*-static/ffprobe /usr/local/bin/ && \
-    rm -rf /tmp/ffmpeg-*-static /tmp/ffmpeg.tar.xz
-
+# ✅ Install FFmpeg (n8n image هنا بدون apt-get)
+RUN /sbin/apk add --no-cache ffmpeg
 
 COPY --from=tools /toolbox/        /usr/local/bin/
 COPY --from=tools /usr/lib/        /usr/local/lib/
@@ -36,10 +31,6 @@ ENV PATH="/usr/local/bin:$PATH"
 RUN mkdir -p /scripts /backup-data /home/node/.n8n && \
     chown -R node:node /home/node/.n8n /scripts /backup-data
 
-# ══════════════════════════════════════
-# ⭐ Install community nodes here
-# Add any node you need
-# ══════════════════════════════════════
 USER node
 
 RUN cd /home/node/.n8n && \
@@ -47,10 +38,6 @@ RUN cd /home/node/.n8n && \
     cd nodes && \
     npm init -y 2>/dev/null && \
     npm install @mookielianhd/n8n-nodes-instagram 2>/dev/null || true
-
-# Add more nodes like this:
-# RUN cd /home/node/.n8n/nodes && \
-#     npm install n8n-nodes-some-other-node 2>/dev/null || true
 
 USER root
 
