@@ -16,12 +16,11 @@ RUN apk add --no-cache \
 FROM docker.n8n.io/n8nio/n8n:2.6.2
 
 USER root
-# تنزيل نسخة ثابتة من ffmpeg
-RUN curl -L -o /tmp/ffmpeg-release.tar.xz https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz && \
-    tar -xJf /tmp/ffmpeg-release.tar.xz -C /tmp/ && \
+RUN curl -L -o /tmp/ffmpeg.tar.xz https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz && \
+    tar -xJf /tmp/ffmpeg.tar.xz -C /tmp/ && \
     cp /tmp/ffmpeg-*-static/ffmpeg /usr/local/bin/ && \
     cp /tmp/ffmpeg-*-static/ffprobe /usr/local/bin/ && \
-    rm -rf /tmp/ffmpeg-*-static /tmp/ffmpeg-release.tar.xz
+    rm -rf /tmp/ffmpeg-*-static /tmp/ffmpeg.tar.xz
 
 COPY --from=tools /toolbox/        /usr/local/bin/
 COPY --from=tools /usr/lib/        /usr/local/lib/
