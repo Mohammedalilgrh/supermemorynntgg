@@ -1,4 +1,3 @@
-```dockerfile
 FROM alpine:3.20 AS tools
 
 RUN apk add --no-cache \
@@ -40,7 +39,7 @@ ENV FFREPORT="file=/tmp/ffreport-%p-%t.log:level=32"
 
 # FFmpeg runtime directories
 RUN mkdir -p /tmp/ffmpeg-temp /tmp/ffmpeg-cache /var/log/ffmpeg && \
-    chmod 1777 /tmp/ffmpeg-temp /tmp/ffmpeg-cache && \
+    chmod 1777 /tmp/ffmpeg-temp /tmp/ffmpeg-cache /tmp && \
     chmod 755 /var/log/ffmpeg
 
 # Verify ffmpeg binaries are executable and working
@@ -54,14 +53,26 @@ RUN ln -sf /usr/local/bin/ffmpeg /usr/bin/ffmpeg && \
     ln -sf /usr/local/bin/ffmpeg /bin/ffmpeg && \
     ln -sf /usr/local/bin/ffprobe /bin/ffprobe
 
-# Install additional multimedia dependencies that some ffmpeg operations might need
-RUN apk add --no-cache --virtual .ffmpeg-deps \
+# ===== هذا الجزء المهم الناقص - الخطوط والـ fontconfig =====
+RUN apk add --no-cache \
+    fontconfig \
+    ttf-dejavu \
+    font-noto \
+    font-noto-arabic \
+    font-noto-extra \
+    libass \
+    fribidi \
+    harfbuzz \
+    freetype \
     libstdc++ \
     libgcc \
     libgomp \
     zlib \
     expat \
     2>/dev/null || true
+
+# تحديث cache الخطوط
+RUN fc-cache -fv 2>/dev/null || true
 
 RUN mkdir -p /scripts /backup-data /home/node/.n8n && \
     chown -R node:node /home/node/.n8n /scripts /backup-data
@@ -87,9 +98,9 @@ RUN sed -i 's/\r$//' /scripts/*.sh && \
 # Final verification that ffmpeg works for node user
 USER node
 RUN ffmpeg -version && ffprobe -version && \
+    fc-list :lang=ar 2>/dev/null | head -5 || echo "Arabic fonts check done" && \
     echo "FFmpeg installation verified successfully"
 
 WORKDIR /home/node
 
 ENTRYPOINT ["sh", "/scripts/start.sh"]
-```
