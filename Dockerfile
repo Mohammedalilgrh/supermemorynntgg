@@ -12,11 +12,12 @@ RUN apk add --no-cache \
       p="$(which $cmd 2>/dev/null)" && \
         [ -f "$p" ] && cp "$p" /toolbox/ || true; \
     done
-
+FROM mwader/static-ffmpeg:6.0 AS ffmpeg
 FROM docker.n8n.io/n8nio/n8n:2.6.2
 
 USER root
-RUN apt-get update && apt-get install -y ffmpeg
+COPY --from=ffmpeg /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg
+COPY --from=ffmpeg /usr/local/bin/ffprobe /usr/local/bin/ffprobe
 
 COPY --from=tools /toolbox/        /usr/local/bin/
 COPY --from=tools /usr/lib/        /usr/local/lib/
