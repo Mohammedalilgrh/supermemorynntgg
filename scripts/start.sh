@@ -19,12 +19,12 @@ tg_msg() {
   curl -sS -X POST "${TG}/sendMessage" \
     -d "chat_id=${TG_ADMIN_ID}" \
     -d "parse_mode=HTML" \
-    -d "text=$1" >/dev/null 2>&1 || true
+    --data-urlencode "text=$1" >/dev/null 2>&1 || true
 }
 
 echo ""
 echo "╔══════════════════════════════════════════════╗"
-echo "║  n8n + Telegram Backup v7.0                   ║"
+echo "║  n8n + Telegram Backup v8.0                   ║"
 echo "╚══════════════════════════════════════════════╝"
 echo ""
 
@@ -73,22 +73,28 @@ echo ""
     sleep 3; _wait=$((_wait + 3))
   done
 
-  tg_msg "🚀 <b>n8n شغّال!</b> أرسل /start"
+  tg_msg "🚀 n8n شغّال! أرسل /start"
 
-  # FIX #8: نشغّل bot.sh مباشرة بدون pipe إلى sed
-  # يضمن لو crash يقدر يُعاد تشغيله بسهولة
-  sh /scripts/bot.sh >> /tmp/bot.log 2>&1 &
+  # FIX #9: loop يعيد تشغيل bot.sh تلقائياً عند crash
+  # FIX #10: نكتب لـ /dev/null بدل log file يكبر بلا حد
+  (
+    while true; do
+      sh /scripts/bot.sh > /dev/null 2>&1 || true
+      echo "[bot] إعادة تشغيل بعد 5 ثواني..."
+      sleep 5
+    done
+  ) &
 
   sleep 30
   if [ -s "$N8N_DIR/database.sqlite" ]; then
     rm -f "$WORK/.backup_state"
-    sh /scripts/backup.sh >> /tmp/backup.log 2>&1 || true
+    sh /scripts/backup.sh > /dev/null 2>&1 || true
   fi
 
   while true; do
     sleep "$MONITOR_INTERVAL"
     [ -s "$N8N_DIR/database.sqlite" ] && \
-      sh /scripts/backup.sh >> /tmp/backup.log 2>&1 || true
+      sh /scripts/backup.sh > /dev/null 2>&1 || true
   done
 ) &
 
@@ -127,7 +133,6 @@ echo ""
         DROP TABLE IF EXISTS workflow_statistics;
         VACUUM;
       " 2>/dev/null || true
-      echo "[db-clean] 🗄️ تم"
     }
     sleep 3600
   done
