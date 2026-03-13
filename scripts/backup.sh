@@ -33,7 +33,6 @@ aggressive_clean() {
   " 2>/dev/null || true
 }
 
-# FIX #1: db_sig يقيس الحجم فقط — نستدعيه مرة واحدة بعد التصدير
 db_sig() {
   [ -f "$N8N_DIR/database.sqlite" ] && \
     stat -c '%s' "$N8N_DIR/database.sqlite" 2>/dev/null || echo 0
@@ -50,7 +49,6 @@ should_bkp() {
   fi
   [ $((_now - _lf)) -ge "$FORCE_INT" ] && { echo "FORCE"; return; }
   aggressive_clean
-  # FIX #1: نحفظ الـ sig هنا لنقارنه لاحقاً بدون إعادة حساب
   _cd=$(db_sig)
   [ "$_cd" = "$_ld" ] && { echo "NOCHANGE"; return; }
   [ $((_now - _le)) -lt "$MIN_INT" ] && { echo "COOLDOWN"; return; }
@@ -61,11 +59,11 @@ DEC=$(should_bkp)
 case "$DEC" in NODB|NOCHANGE|COOLDOWN) exit 0;; esac
 [ "$DEC" = "FORCE" ] && aggressive_clean
 
-# FIX #1: نحفظ الـ sig قبل أي عملية تصدير
 SIG_BEFORE_DUMP=$(db_sig)
 
 TS_LABEL=$(date +"%Y-%m-%d_%H-%M-%S")
 TS_ISO=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+NOW=$(date +%s)
 
 echo "┌─────────────────────────────────────┐"
 echo "│ 📦 باك أب: $TS_LABEL ($DEC)"
@@ -136,7 +134,6 @@ done < "$TMP/parts_list.txt"
 
 [ "$UPLOAD_OK" = "true" ] || { echo "  ❌ فشل الرفع"; exit 1; }
 
-# FIX #2: نستخدم JSON كامل للـ manifest بدل خلط -d مع --data-urlencode
 if [ "$TOTAL_PARTS" -gt 1 ]; then
   _manifest_text="🗂️ #n8n_manifest\n🆔 ${TS_LABEL}\n📦 أجزاء: ${TOTAL_PARTS}\n💾 ${DB_SIZE}"
   _mresp=$(curl -sS -X POST "${TG}/sendMessage" \
@@ -154,13 +151,20 @@ if [ -n "$LAST_MSG_ID" ]; then
   echo "  📌 مثبّت! (msg=$LAST_MSG_ID)"
 fi
 
-# FIX #1: نحفظ SIG_BEFORE_DUMP — هو نفس اللي قارنّاه في should_bkp
-# لا نستدعي db_sig() مرة ثانية لأن .dump غيّر حجم الملف
+# FIX #2: LF يتحدث فقط عند FORCE — الباك أب العادي يحافظ على LF القديم
+# بدون هذا، كل باك أب عادي يعيد ضبط LF ولا يصير FORCE أبداً
+_old_lf=0
+[ -f "$STATE" ] && _old_lf=$(grep '^LF=' "$STATE" 2>/dev/null | cut -d= -f2 || echo 0)
+case "$DEC" in
+  FORCE) _new_lf=$NOW ;;   # FORCE فقط يحدث LF
+  *)     _new_lf=$_old_lf ;; # CHANGED يبقي LF كما هو
+esac
+
 cat > "$STATE" <<EOF
 ID=$TS_LABEL
 TS=$TS_ISO
-LE=$(date +%s)
-LF=$(date +%s)
+LE=${NOW}
+LF=${_new_lf}
 LD=${SIG_BEFORE_DUMP}
 FC=$FILE_COUNT
 SZ=$DB_SIZE
