@@ -121,17 +121,20 @@ if [ -n "$BACKUP_ID" ]; then
     if [ "$_parts_count" -gt 0 ]; then
       echo "  🔗 تجميع $_parts_count أجزاء..."
 
-      # FIX #7: بدل xargs cat (يمسح الـ output عند كل batch)
-      # نلوب على الملفات مرتّبة ونضيفهم واحد بواحد بـ >>
+      # FIX #1: بدل pipe | while (subshell يمنع _first من التحديث)
+      # نكتب قائمة الملفات لـ file ثم نلوب بـ < (نفس الـ shell)
+      find "$TMP/parts/" -name "*.part_*" -type f | sort > "$TMP/parts_to_join.txt"
+
       _first=true
-      find "$TMP/parts/" -name "*.part_*" -type f | sort | while IFS= read -r _pf; do
+      while IFS= read -r _pf; do
         if [ "$_first" = "true" ]; then
-          cat "$_pf" > "$TMP/db.sql.gz"
+          cat "$_pf"  > "$TMP/db.sql.gz"
           _first=false
         else
           cat "$_pf" >> "$TMP/db.sql.gz"
         fi
-      done
+      done < "$TMP/parts_to_join.txt"
+      # الآن _first يتحدث صح لأننا في نفس الـ shell بلا pipe
 
       if [ -s "$TMP/db.sql.gz" ]; then
         if restore_from_gz "$TMP/db.sql.gz"; then
