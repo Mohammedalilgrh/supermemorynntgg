@@ -56,46 +56,32 @@ restore_from_gz() {
 }
 
 # ════════════════════════════════════════════
-# الخطوة 1: جيب آخر 100 رسالة
+# الخطوة 1: الرسالة المثبّتة
 # ════════════════════════════════════════════
-echo "📥 جلب الرسائل..."
-
-_resp=$(curl -sS "${TG}/getUpdates?offset=-100&limit=100&allowed_updates=[\"channel_post\",\"message\"]" \
-  2>/dev/null || true)
-
-# لو getUpdates ما رجّع شيء، جرب getChatHistory
-_results=$(echo "$_resp" | jq -r '.result // []' 2>/dev/null)
-
-# ════════════════════════════════════════════
-# الخطوة 2: ابحث عن آخر باك أب وحدد ID تاعه
-# ════════════════════════════════════════════
-
-# أول شيء جرب الرسالة المثبّتة
 echo "📌 فحص الرسالة المثبّتة..."
 PINNED=$(curl -sS "${TG}/getChat?chat_id=${TG_CHAT_ID}" 2>/dev/null || true)
 _pin_fname=$(echo "$PINNED" | jq -r '.result.pinned_message.document.file_name // empty' 2>/dev/null || true)
 _pin_caption=$(echo "$PINNED" | jq -r '.result.pinned_message.caption // empty' 2>/dev/null || true)
 _pin_fid=$(echo "$PINNED" | jq -r '.result.pinned_message.document.file_id // empty' 2>/dev/null || true)
-_pin_msg_id=$(echo "$PINNED" | jq -r '.result.pinned_message.message_id // empty' 2>/dev/null || true)
 
-echo "  📌 الرسالة المثبّتة: $_pin_fname"
+echo "  📌 الملف المثبّت: ${_pin_fname:-لا يوجد}"
 
-# استخرج backup ID من الكابشن (صيغة: 2025-01-01_12-00-00)
+# استخرج BACKUP_ID من الكابشن
 BACKUP_ID=$(echo "$_pin_caption" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-9]{2}' | head -1 || true)
-
-if [ -z "$BACKUP_ID" ]; then
-  # جرب من اسم الملف
-  BACKUP_ID=$(echo "$_pin_fname" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-9]{2}' | head -1 || true)
-fi
-
+[ -z "$BACKUP_ID" ] && BACKUP_ID=$(echo "$_pin_fname" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-9]{2}' | head -1 || true)
 echo "  🆔 Backup ID: ${BACKUP_ID:-غير محدد}"
 
 # ════════════════════════════════════════════
-# الخطوة 3: لو الملف ملف واحد (db.sql.gz) — رجّع مباشرة
+# الخطوة 2: لو ملف واحد db.sql.gz → رجّعه مباشرة
 # ════════════════════════════════════════════
 if [ -n "$_pin_fid" ]; then
+  # FIX #6: فحص الاسم بدون split على ":"
   _is_single=false
-  echo "$_pin_fname" | grep -q "db\.sql\.gz$" && ! echo "$_pin_fname" | grep -q "part_" && _is_single=true
+  case "$_pin_fname" in
+    db.sql.gz) _is_single=true ;;
+    *part_*)   _is_single=false ;;
+    *.sql.gz)  _is_single=true ;;
+  esac
 
   if [ "$_is_single" = "true" ]; then
     echo "  📄 ملف واحد — استرجاع مباشر..."
@@ -109,45 +95,38 @@ if [ -n "$_pin_fid" ]; then
 fi
 
 # ════════════════════════════════════════════
-# الخطوة 4: ابحث عن كل الأجزاء بنفس الـ BACKUP_ID
+# الخطوة 3: ابحث عن كل الأجزاء بنفس BACKUP_ID
+# FIX #7: نستخدم getUpdates بدون offset سالب
 # ════════════════════════════════════════════
 if [ -n "$BACKUP_ID" ]; then
   echo "🔍 البحث عن أجزاء الباك أب: $BACKUP_ID"
 
-  # جلب الرسائل الأخيرة من القناة
-  _msgs=$(curl -sS "${TG}/getUpdates?offset=-200&limit=200" 2>/dev/null | \
-    jq -r '.result[]? | select(.channel_post.document != null) | 
-    select(.channel_post.caption? // "" | contains("'"$BACKUP_ID"'")) |
-    "\(.channel_post.document.file_id):\(.channel_post.document.file_name)"' \
-    2>/dev/null || true)
+  # نجيب updates بدون offset محدد (آخر ما وصل)
+  _raw=$(curl -sS "${TG}/getUpdates?limit=100" 2>/dev/null || true)
 
-  if [ -z "$_msgs" ]; then
-    # جرب message بدل channel_post
-    _msgs=$(curl -sS "${TG}/getUpdates?offset=-200&limit=200" 2>/dev/null | \
-      jq -r '.result[]? | select(.message.document != null) | 
-      select(.message.caption? // "" | contains("'"$BACKUP_ID"'")) |
-      "\(.message.document.file_id):\(.message.document.file_name)"' \
-      2>/dev/null || true)
-  fi
+  # FIX #6: نفصل file_id و filename بـ TAB بدل ":"
+  _msgs=$(echo "$_raw" | jq -r '
+    .result[]? |
+    (.channel_post // .message) |
+    select(.document != null) |
+    select(.caption? // "" | contains("'"$BACKUP_ID"'")) |
+    "\(.document.file_id)\t\(.document.file_name)"
+  ' 2>/dev/null || true)
 
   if [ -n "$_msgs" ]; then
-    echo "  📦 وجدنا أجزاء!"
-    PART_COUNT=0
+    echo "  📦 وجدنا أجزاء — تحميل..."
 
-    # رتّب الأجزاء حسب الاسم
-    echo "$_msgs" | sort -t: -k2 | while IFS=: read -r _fid _fname; do
+    echo "$_msgs" | sort -t"$(printf '\t')" -k2 | while IFS="$(printf '\t')" read -r _fid _fname; do
+      [ -n "$_fid" ] || continue
       echo "    📥 تحميل: $_fname"
-      if dl_file "$_fid" "$TMP/parts/$_fname"; then
-        echo "    ✅ تم: $_fname"
-        PART_COUNT=$((PART_COUNT + 1))
-      fi
+      dl_file "$_fid" "$TMP/parts/$_fname" && echo "    ✅ تم: $_fname" || echo "    ⚠️ فشل: $_fname"
     done
 
-    # تجميع الأجزاء
-    _part_files=$(ls "$TMP/parts/" 2>/dev/null | sort | grep "part_" || true)
-    if [ -n "$_part_files" ]; then
-      echo "  🔗 تجميع الأجزاء..."
-      cat $(ls "$TMP/parts/"*.part_* 2>/dev/null | sort) > "$TMP/db.sql.gz" 2>/dev/null || true
+    # FIX #8: تحقق من وجود ملفات قبل cat
+    _parts_count=$(find "$TMP/parts/" -name "*.part_*" -type f 2>/dev/null | wc -l | tr -d ' ')
+    if [ "$_parts_count" -gt 0 ]; then
+      echo "  🔗 تجميع $_parts_count أجزاء..."
+      find "$TMP/parts/" -name "*.part_*" -type f | sort | xargs cat > "$TMP/db.sql.gz" 2>/dev/null || true
 
       if [ -s "$TMP/db.sql.gz" ]; then
         if restore_from_gz "$TMP/db.sql.gz"; then
@@ -160,13 +139,13 @@ if [ -n "$BACKUP_ID" ]; then
 fi
 
 # ════════════════════════════════════════════
-# الخطوة 5: بحث شامل — أي ملف db.sql.gz
+# الخطوة 4: بحث شامل — أي ملف db.sql.gz
 # ════════════════════════════════════════════
 echo "🔍 بحث شامل..."
 
-_db_fid=$(curl -sS "${TG}/getUpdates?offset=-100&limit=100" 2>/dev/null | \
+_db_fid=$(curl -sS "${TG}/getUpdates?limit=100" 2>/dev/null | \
   jq -r '
-    [.result[]? | 
+    [.result[]? |
       (.channel_post // .message) |
       select(.document != null) |
       select(
