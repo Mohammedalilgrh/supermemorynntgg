@@ -16,11 +16,9 @@ CHUNK_BYTES=18874368
 STATE="$WORK/.backup_state"
 LOCK="$WORK/.backup_lock"
 TMP="$WORK/_bkp_tmp"
-
 TG="https://api.telegram.org/bot${TG_BOT_TOKEN}"
 
 mkdir -p "$WORK"
-
 if ! mkdir "$LOCK" 2>/dev/null; then exit 0; fi
 trap 'rmdir "$LOCK" 2>/dev/null; rm -rf "$TMP" 2>/dev/null' EXIT
 
@@ -35,6 +33,7 @@ aggressive_clean() {
   " 2>/dev/null || true
 }
 
+# FIX #1: db_sig يقيس الحجم فقط — نستدعيه مرة واحدة بعد التصدير
 db_sig() {
   [ -f "$N8N_DIR/database.sqlite" ] && \
     stat -c '%s' "$N8N_DIR/database.sqlite" 2>/dev/null || echo 0
@@ -49,10 +48,9 @@ should_bkp() {
     _lf=$(grep '^LF=' "$STATE" 2>/dev/null | cut -d= -f2 || echo 0)
     _ld=$(grep '^LD=' "$STATE" 2>/dev/null | cut -d= -f2- || true)
   fi
-  # FIX #3: FORCE يرجع مبكراً قبل التنظيف — نتعامل معه بعدين
   [ $((_now - _lf)) -ge "$FORCE_INT" ] && { echo "FORCE"; return; }
-  # نظّف أولاً ثم احسب الـ signature
   aggressive_clean
+  # FIX #1: نحفظ الـ sig هنا لنقارنه لاحقاً بدون إعادة حساب
   _cd=$(db_sig)
   [ "$_cd" = "$_ld" ] && { echo "NOCHANGE"; return; }
   [ $((_now - _le)) -lt "$MIN_INT" ] && { echo "COOLDOWN"; return; }
@@ -61,9 +59,10 @@ should_bkp() {
 
 DEC=$(should_bkp)
 case "$DEC" in NODB|NOCHANGE|COOLDOWN) exit 0;; esac
-
-# لو FORCE نظّف الآن (should_bkp رجع مبكراً قبل aggressive_clean)
 [ "$DEC" = "FORCE" ] && aggressive_clean
+
+# FIX #1: نحفظ الـ sig قبل أي عملية تصدير
+SIG_BEFORE_DUMP=$(db_sig)
 
 TS_LABEL=$(date +"%Y-%m-%d_%H-%M-%S")
 TS_ISO=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
@@ -77,7 +76,6 @@ rm -rf "$TMP"; mkdir -p "$TMP/parts"
 echo "  🗄️ تصدير الداتابيس..."
 sqlite3 "$N8N_DIR/database.sqlite" ".timeout 10000" \
   "PRAGMA wal_checkpoint(TRUNCATE);" >/dev/null 2>&1 || true
-
 sqlite3 "$N8N_DIR/database.sqlite" ".timeout 10000" ".dump" 2>/dev/null \
   | gzip -n -"$GZIP_LVL" -c > "$TMP/db.sql.gz"
 
@@ -97,9 +95,6 @@ else
 fi
 
 echo "  📤 رفع $TOTAL_PARTS ملف..."
-
-# FIX #1 #2: استخدام while read من file بدل pipe
-# يضمن FILE_COUNT و LAST_MSG_ID و UPLOAD_OK تتحدث في نفس الـ shell
 find "$TMP/parts/" -type f | sort > "$TMP/parts_list.txt"
 
 FILE_COUNT=0
@@ -124,44 +119,33 @@ while IFS= read -r _fp; do
       -F "document=@${_fp};filename=${_fn}" \
       -F "caption=${_caption}" \
       2>/dev/null || true)
-
     _rok=$(echo "$_resp" | jq -r '.ok // "false"' 2>/dev/null || true)
     _mid=$(echo "$_resp" | jq -r '.result.message_id // empty' 2>/dev/null || true)
-
     if [ "$_rok" = "true" ] && [ -n "$_mid" ]; then
-      _ok_flag="yes"
-      LAST_MSG_ID="$_mid"
-      echo "    ✅ $_fn ($_fs)"
-      break
+      _ok_flag="yes"; LAST_MSG_ID="$_mid"
+      echo "    ✅ $_fn ($_fs)"; break
     fi
-    _try=$((_try + 1))
-    sleep 3
+    _try=$((_try + 1)); sleep 3
   done
 
   if [ -z "$_ok_flag" ]; then
-    UPLOAD_OK=false
-    echo "    ❌ فشل: $_fn"
-    break
+    UPLOAD_OK=false; echo "    ❌ فشل: $_fn"; break
   fi
   sleep 1
 done < "$TMP/parts_list.txt"
 
-if [ "$UPLOAD_OK" = "false" ]; then
-  echo "  ❌ فشل الرفع"; exit 1
-fi
+[ "$UPLOAD_OK" = "true" ] || { echo "  ❌ فشل الرفع"; exit 1; }
 
+# FIX #2: نستخدم JSON كامل للـ manifest بدل خلط -d مع --data-urlencode
 if [ "$TOTAL_PARTS" -gt 1 ]; then
+  _manifest_text="🗂️ #n8n_manifest\n🆔 ${TS_LABEL}\n📦 أجزاء: ${TOTAL_PARTS}\n💾 ${DB_SIZE}"
   _mresp=$(curl -sS -X POST "${TG}/sendMessage" \
-    -d "chat_id=${TG_CHAT_ID}" \
-    --data-urlencode "text=🗂️ #n8n_manifest
-🆔 ${TS_LABEL}
-📦 أجزاء: ${TOTAL_PARTS}
-💾 ${DB_SIZE}" \
+    -H "Content-Type: application/json" \
+    -d "{\"chat_id\":\"${TG_CHAT_ID}\",\"text\":\"${_manifest_text}\"}" \
     2>/dev/null || true)
   LAST_MSG_ID=$(echo "$_mresp" | jq -r '.result.message_id // empty' 2>/dev/null || true)
 fi
 
-# FIX #2: الآن LAST_MSG_ID فيها القيمة الصحيحة
 if [ -n "$LAST_MSG_ID" ]; then
   curl -sS -X POST "${TG}/pinChatMessage" \
     -d "chat_id=${TG_CHAT_ID}" \
@@ -170,12 +154,14 @@ if [ -n "$LAST_MSG_ID" ]; then
   echo "  📌 مثبّت! (msg=$LAST_MSG_ID)"
 fi
 
+# FIX #1: نحفظ SIG_BEFORE_DUMP — هو نفس اللي قارنّاه في should_bkp
+# لا نستدعي db_sig() مرة ثانية لأن .dump غيّر حجم الملف
 cat > "$STATE" <<EOF
 ID=$TS_LABEL
 TS=$TS_ISO
 LE=$(date +%s)
 LF=$(date +%s)
-LD=$(db_sig)
+LD=${SIG_BEFORE_DUMP}
 FC=$FILE_COUNT
 SZ=$DB_SIZE
 PARTS=$TOTAL_PARTS
