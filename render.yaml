@@ -57,7 +57,7 @@ services:
       - key: N8N_DEFAULT_BINARY_DATA_MODE
         value: "filesystem"
       - key: N8N_BINARY_DATA_TTL
-        value: "10"
+        value: "1"
       - key: N8N_RUNNERS_ENABLED
         value: "false"
       - key: EXECUTIONS_PROCESS
