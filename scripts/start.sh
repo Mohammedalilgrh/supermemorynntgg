@@ -24,7 +24,7 @@ tg_msg() {
 
 echo ""
 echo "╔══════════════════════════════════════════════╗"
-echo "║  n8n + Telegram Backup v6.0                   ║"
+echo "║  n8n + Telegram Backup v6.1                   ║"
 echo "╚══════════════════════════════════════════════╝"
 echo ""
 
@@ -32,7 +32,6 @@ echo ""
 if [ ! -s "$N8N_DIR/database.sqlite" ]; then
   echo "📦 جاري الاسترجاع..."
   sh /scripts/restore.sh 2>&1 || true
-
   if [ -s "$N8N_DIR/database.sqlite" ]; then
     _tc=$(sqlite3 "$N8N_DIR/database.sqlite" \
       "SELECT count(*) FROM sqlite_master WHERE type='table';" 2>/dev/null || echo 0)
@@ -49,7 +48,7 @@ rm -rf "$N8N_DIR/binaryData" 2>/dev/null || true
 mkdir -p "$N8N_DIR/binaryData"
 echo "🧹 binaryData نظيف"
 
-# FIX #10: نفس منطق backup.sh — نمسح كل التنفيذات مو بس finished
+# ── تنظيف DB عند التشغيل ──
 if [ -s "$N8N_DIR/database.sqlite" ]; then
   echo "🗄️ تنظيف سجلات قديمة..."
   _before=$(du -h "$N8N_DIR/database.sqlite" | cut -f1)
@@ -66,21 +65,15 @@ fi
 
 echo ""
 
-# ══════════════════════════════════════
-# الخلفية: بوت + باك أب
-# ══════════════════════════════════════
+# ── بوت + باك أب ──
 (
   _wait=0
   while [ "$_wait" -lt 120 ]; do
-    if curl -sS -o /dev/null "http://localhost:${N8N_PORT:-5678}/healthz" 2>/dev/null; then
-      break
-    fi
-    sleep 3
-    _wait=$((_wait + 3))
+    curl -sS -o /dev/null "http://localhost:${N8N_PORT:-5678}/healthz" 2>/dev/null && break
+    sleep 3; _wait=$((_wait + 3))
   done
 
   tg_msg "🚀 <b>n8n شغّال!</b> أرسل /start"
-
   sh /scripts/bot.sh 2>&1 | sed 's/^/[bot] /' &
 
   sleep 30
@@ -96,18 +89,13 @@ echo ""
   done
 ) &
 
-# FIX #11: Keep-Alive خارجي — يطلب Render نفسه عشان ما ينام
-# هذا يشتغل بس لو N8N_HOST معرّف
+# ── Keep-Alive (داخلي + خارجي) ──
 (
   sleep 60
   while true; do
-    # Ping داخلي
-    curl -sS -o /dev/null \
-      "http://localhost:${N8N_PORT:-5678}/healthz" 2>/dev/null || true
-    # Ping خارجي لو N8N_HOST موجود (يمنع نوم Render)
+    curl -sS -o /dev/null "http://localhost:${N8N_PORT:-5678}/healthz" 2>/dev/null || true
     [ -n "${N8N_HOST:-}" ] && \
-      curl -sS -o /dev/null \
-        "https://${N8N_HOST}/healthz" 2>/dev/null || true
+      curl -sS -o /dev/null "https://${N8N_HOST}/healthz" 2>/dev/null || true
     sleep 240
   done
 ) &
@@ -116,19 +104,19 @@ echo ""
 (
   sleep 600
   while true; do
-    if [ -d "$N8N_DIR/binaryData" ]; then
+    [ -d "$N8N_DIR/binaryData" ] && {
       find "$N8N_DIR/binaryData" -type f -mmin +10 -delete 2>/dev/null || true
       find "$N8N_DIR/binaryData" -type d -empty -delete 2>/dev/null || true
-    fi
+    }
     sleep 600
   done
 ) &
 
-# FIX #10: تنظيف DB كل ساعة — نفس منطق backup.sh
+# ── تنظيف DB كل ساعة ──
 (
   sleep 3600
   while true; do
-    if [ -s "$N8N_DIR/database.sqlite" ]; then
+    [ -s "$N8N_DIR/database.sqlite" ] && {
       sqlite3 "$N8N_DIR/database.sqlite" "
         DELETE FROM execution_entity;
         DELETE FROM execution_data WHERE executionId NOT IN (SELECT id FROM execution_entity);
@@ -136,8 +124,8 @@ echo ""
         DROP TABLE IF EXISTS workflow_statistics;
         VACUUM;
       " 2>/dev/null || true
-      echo "[db-clean] 🗄️ تم تنظيف السجلات"
-    fi
+      echo "[db-clean] 🗄️ تم"
+    }
     sleep 3600
   done
 ) &
