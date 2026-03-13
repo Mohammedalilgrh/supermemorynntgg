@@ -24,7 +24,7 @@ tg_msg() {
 
 echo ""
 echo "╔══════════════════════════════════════════════╗"
-echo "║  n8n + Telegram Backup v5.2 FINAL             ║"
+echo "║  n8n + Telegram Backup v6.0                   ║"
 echo "╚══════════════════════════════════════════════╝"
 echo ""
 
@@ -44,18 +44,20 @@ else
   echo "✅ الداتابيس موجودة"
 fi
 
-# ── تنظيف عند التشغيل ──
+# ── تنظيف binaryData عند التشغيل ──
 rm -rf "$N8N_DIR/binaryData" 2>/dev/null || true
 mkdir -p "$N8N_DIR/binaryData"
 echo "🧹 binaryData نظيف"
 
-# ── تنظيف سجلات الداتابيس ──
+# FIX #10: نفس منطق backup.sh — نمسح كل التنفيذات مو بس finished
 if [ -s "$N8N_DIR/database.sqlite" ]; then
   echo "🗄️ تنظيف سجلات قديمة..."
   _before=$(du -h "$N8N_DIR/database.sqlite" | cut -f1)
   sqlite3 "$N8N_DIR/database.sqlite" "
-    DELETE FROM execution_entity WHERE finished = 1;
+    DELETE FROM execution_entity;
     DELETE FROM execution_data WHERE executionId NOT IN (SELECT id FROM execution_entity);
+    DROP TABLE IF EXISTS execution_metadata;
+    DROP TABLE IF EXISTS workflow_statistics;
     VACUUM;
   " 2>/dev/null || true
   _after=$(du -h "$N8N_DIR/database.sqlite" | cut -f1)
@@ -94,23 +96,23 @@ echo ""
   done
 ) &
 
-# ══════════════════════════════════════
-# Keep-Alive
-# ══════════════════════════════════════
+# FIX #11: Keep-Alive خارجي — يطلب Render نفسه عشان ما ينام
+# هذا يشتغل بس لو N8N_HOST معرّف
 (
   sleep 60
   while true; do
+    # Ping داخلي
     curl -sS -o /dev/null \
       "http://localhost:${N8N_PORT:-5678}/healthz" 2>/dev/null || true
-    sleep 300
+    # Ping خارجي لو N8N_HOST موجود (يمنع نوم Render)
+    [ -n "${N8N_HOST:-}" ] && \
+      curl -sS -o /dev/null \
+        "https://${N8N_HOST}/healthz" 2>/dev/null || true
+    sleep 240
   done
 ) &
 
-# ══════════════════════════════════════
-# ⭐ تنظيف binaryData كل 60 ثانية
-# ملفات أقدم من 3 دقائق تنمسح
-# الملفات الجديدة (قاعد تشتغل) تبقى
-# ══════════════════════════════════════
+# ── تنظيف binaryData كل 10 دقائق ──
 (
   sleep 600
   while true; do
@@ -121,18 +123,17 @@ echo ""
     sleep 600
   done
 ) &
-# ══════════════════════════════════════
-# ⭐ تنظيف سجلات الداتابيس كل ساعة
-# يمسح سجلات التنفيذات القديمة
-# يبقي الداتابيس صغيرة دائماً
-# ══════════════════════════════════════
+
+# FIX #10: تنظيف DB كل ساعة — نفس منطق backup.sh
 (
   sleep 3600
   while true; do
     if [ -s "$N8N_DIR/database.sqlite" ]; then
       sqlite3 "$N8N_DIR/database.sqlite" "
-        DELETE FROM execution_entity WHERE finished = 1;
+        DELETE FROM execution_entity;
         DELETE FROM execution_data WHERE executionId NOT IN (SELECT id FROM execution_entity);
+        DROP TABLE IF EXISTS execution_metadata;
+        DROP TABLE IF EXISTS workflow_statistics;
         VACUUM;
       " 2>/dev/null || true
       echo "[db-clean] 🗄️ تم تنظيف السجلات"
