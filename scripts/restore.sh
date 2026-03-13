@@ -16,8 +16,7 @@ if [ -s "$N8N_DIR/database.sqlite" ]; then
   _tc=$(sqlite3 "$N8N_DIR/database.sqlite" \
     "SELECT count(*) FROM sqlite_master WHERE type='table';" 2>/dev/null || echo 0)
   if [ "$_tc" -gt 0 ]; then
-    echo "✅ DB موجودة ($_tc جدول)"
-    exit 0
+    echo "✅ DB موجودة ($_tc جدول)"; exit 0
   fi
   rm -f "$N8N_DIR/database.sqlite"
 fi
@@ -56,17 +55,25 @@ restore_from_gz() {
 # ════════════════════════════════════════════
 echo "📌 فحص الرسالة المثبّتة..."
 PINNED=$(curl -sS "${TG}/getChat?chat_id=${TG_CHAT_ID}" 2>/dev/null || true)
-_pin_fname=$(echo "$PINNED" | jq -r '.result.pinned_message.document.file_name // empty' 2>/dev/null || true)
-_pin_caption=$(echo "$PINNED" | jq -r '.result.pinned_message.caption // empty' 2>/dev/null || true)
-_pin_fid=$(echo "$PINNED" | jq -r '.result.pinned_message.document.file_id // empty' 2>/dev/null || true)
-echo "  📌 الملف المثبّت: ${_pin_fname:-لا يوجد}"
 
-BACKUP_ID=$(echo "$_pin_caption" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-9]{2}' | head -1 || true)
-[ -z "$BACKUP_ID" ] && BACKUP_ID=$(echo "$_pin_fname" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-9]{2}' | head -1 || true)
+_pin_fname=$(echo "$PINNED"   | jq -r '.result.pinned_message.document.file_name // empty' 2>/dev/null || true)
+_pin_fid=$(echo "$PINNED"     | jq -r '.result.pinned_message.document.file_id   // empty' 2>/dev/null || true)
+
+# FIX #4: الـ manifest نصية → نقرأ .text، الـ document → نقرأ .caption
+_pin_caption=$(echo "$PINNED" | jq -r '.result.pinned_message.caption // empty' 2>/dev/null || true)
+_pin_text=$(echo "$PINNED"    | jq -r '.result.pinned_message.text    // empty' 2>/dev/null || true)
+
+# نجمع النصين للبحث عن BACKUP_ID
+_pin_all_text="${_pin_caption} ${_pin_text} ${_pin_fname}"
+echo "  📌 الملف المثبّت: ${_pin_fname:-رسالة نصية}"
+
+BACKUP_ID=$(echo "$_pin_all_text" \
+  | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-9]{2}' \
+  | head -1 || true)
 echo "  🆔 Backup ID: ${BACKUP_ID:-غير محدد}"
 
 # ════════════════════════════════════════════
-# الخطوة 2: ملف واحد مباشر
+# الخطوة 2: ملف واحد مباشر (ليس manifest)
 # ════════════════════════════════════════════
 if [ -n "$_pin_fid" ]; then
   _is_single=false
@@ -80,8 +87,7 @@ if [ -n "$_pin_fid" ]; then
     echo "  📄 ملف واحد — استرجاع مباشر..."
     if dl_file "$_pin_fid" "$TMP/db.sql.gz"; then
       if restore_from_gz "$TMP/db.sql.gz"; then
-        echo "🎉 تم من الرسالة المثبّتة!"
-        exit 0
+        echo "🎉 تم من الرسالة المثبّتة!"; exit 0
       fi
     fi
   fi
@@ -89,15 +95,12 @@ fi
 
 # ════════════════════════════════════════════
 # الخطوة 3: تحميل الأجزاء بنفس BACKUP_ID
-# FIX #4: نكتب الـ msgs لـ temp file بدل pipe
-# FIX #5: نستخدم getUpdates بدون offset سالب
 # ════════════════════════════════════════════
 if [ -n "$BACKUP_ID" ]; then
   echo "🔍 البحث عن أجزاء: $BACKUP_ID"
 
   _raw=$(curl -sS "${TG}/getUpdates?limit=100" 2>/dev/null || true)
 
-  # FIX #4: نكتب النتائج لـ file بدل pipe لتجنب subshell
   echo "$_raw" | jq -r '
     .result[]? |
     (.channel_post // .message) |
@@ -108,27 +111,22 @@ if [ -n "$BACKUP_ID" ]; then
 
   if [ -s "$TMP/msgs.txt" ]; then
     echo "  📦 وجدنا أجزاء — تحميل..."
-
-    # FIX #4: while read من file مو من pipe
     sort -t"$(printf '\t')" -k2 "$TMP/msgs.txt" > "$TMP/msgs_sorted.txt"
+
     while IFS="$(printf '\t')" read -r _fid _fname; do
       [ -n "$_fid" ] || continue
       echo "    📥 تحميل: $_fname"
       dl_file "$_fid" "$TMP/parts/$_fname" \
-        && echo "    ✅ تم" \
-        || echo "    ⚠️ فشل: $_fname"
+        && echo "    ✅ تم" || echo "    ⚠️ فشل: $_fname"
     done < "$TMP/msgs_sorted.txt"
 
     _parts_count=$(find "$TMP/parts/" -name "*.part_*" -type f 2>/dev/null | wc -l | tr -d ' ')
     if [ "$_parts_count" -gt 0 ]; then
       echo "  🔗 تجميع $_parts_count أجزاء..."
       find "$TMP/parts/" -name "*.part_*" -type f | sort | xargs cat > "$TMP/db.sql.gz" 2>/dev/null || true
-
       if [ -s "$TMP/db.sql.gz" ]; then
-        # FIX #6: restore_from_gz هنا في الـ parent shell مباشرة، exit 0 يعمل صح
         if restore_from_gz "$TMP/db.sql.gz"; then
-          echo "🎉 تم من الأجزاء المجمّعة!"
-          exit 0
+          echo "🎉 تم من الأجزاء المجمّعة!"; exit 0
         fi
       fi
     fi
@@ -155,10 +153,8 @@ _db_fid=$(curl -sS "${TG}/getUpdates?limit=100" 2>/dev/null | \
 if [ -n "$_db_fid" ]; then
   echo "  📋 وجدنا ملف!"
   if dl_file "$_db_fid" "$TMP/db_found.sql.gz"; then
-    # FIX #6: في الـ parent shell مباشرة
     if restore_from_gz "$TMP/db_found.sql.gz"; then
-      echo "🎉 تم!"
-      exit 0
+      echo "🎉 تم!"; exit 0
     fi
   fi
 fi
