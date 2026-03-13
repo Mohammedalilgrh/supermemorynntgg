@@ -24,7 +24,7 @@ tg_msg() {
 
 echo ""
 echo "╔══════════════════════════════════════════════╗"
-echo "║  n8n + Telegram Backup v6.1                   ║"
+echo "║  n8n + Telegram Backup v7.0                   ║"
 echo "╚══════════════════════════════════════════════╝"
 echo ""
 
@@ -74,22 +74,25 @@ echo ""
   done
 
   tg_msg "🚀 <b>n8n شغّال!</b> أرسل /start"
-  sh /scripts/bot.sh 2>&1 | sed 's/^/[bot] /' &
+
+  # FIX #8: نشغّل bot.sh مباشرة بدون pipe إلى sed
+  # يضمن لو crash يقدر يُعاد تشغيله بسهولة
+  sh /scripts/bot.sh >> /tmp/bot.log 2>&1 &
 
   sleep 30
   if [ -s "$N8N_DIR/database.sqlite" ]; then
     rm -f "$WORK/.backup_state"
-    sh /scripts/backup.sh 2>&1 | sed 's/^/[backup] /' || true
+    sh /scripts/backup.sh >> /tmp/backup.log 2>&1 || true
   fi
 
   while true; do
     sleep "$MONITOR_INTERVAL"
     [ -s "$N8N_DIR/database.sqlite" ] && \
-      sh /scripts/backup.sh 2>&1 | sed 's/^/[backup] /' || true
+      sh /scripts/backup.sh >> /tmp/backup.log 2>&1 || true
   done
 ) &
 
-# ── Keep-Alive (داخلي + خارجي) ──
+# ── Keep-Alive ──
 (
   sleep 60
   while true; do
