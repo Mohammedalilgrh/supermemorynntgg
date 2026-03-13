@@ -24,10 +24,6 @@ mkdir -p "$WORK"
 if ! mkdir "$LOCK" 2>/dev/null; then exit 0; fi
 trap 'rmdir "$LOCK" 2>/dev/null; rm -rf "$TMP" 2>/dev/null' EXIT
 
-# ══════════════════════════════════════
-# تنظيف عدواني — يمسح التنفيذات فقط
-# FIX #3: أضفنا IF EXISTS لكل جدول
-# ══════════════════════════════════════
 aggressive_clean() {
   [ -s "$N8N_DIR/database.sqlite" ] || return 0
   sqlite3 "$N8N_DIR/database.sqlite" "
@@ -39,14 +35,9 @@ aggressive_clean() {
   " 2>/dev/null || true
 }
 
-# FIX #4: db_sig تُحسب بعد التنظيف وليس قبله
 db_sig() {
-  _s=""
-  for _f in database.sqlite; do
-    [ -f "$N8N_DIR/$_f" ] && \
-      _s="${_s}${_f}:$(stat -c '%s' "$N8N_DIR/$_f" 2>/dev/null || echo 0);"
-  done
-  printf "%s" "$_s"
+  [ -f "$N8N_DIR/database.sqlite" ] && \
+    stat -c '%s' "$N8N_DIR/database.sqlite" 2>/dev/null || echo 0
 }
 
 should_bkp() {
@@ -58,8 +49,9 @@ should_bkp() {
     _lf=$(grep '^LF=' "$STATE" 2>/dev/null | cut -d= -f2 || echo 0)
     _ld=$(grep '^LD=' "$STATE" 2>/dev/null | cut -d= -f2- || true)
   fi
+  # FIX #3: FORCE يرجع مبكراً قبل التنظيف — نتعامل معه بعدين
   [ $((_now - _lf)) -ge "$FORCE_INT" ] && { echo "FORCE"; return; }
-  # FIX #4: نظّف أولاً ثم احسب الـ signature
+  # نظّف أولاً ثم احسب الـ signature
   aggressive_clean
   _cd=$(db_sig)
   [ "$_cd" = "$_ld" ] && { echo "NOCHANGE"; return; }
@@ -69,6 +61,9 @@ should_bkp() {
 
 DEC=$(should_bkp)
 case "$DEC" in NODB|NOCHANGE|COOLDOWN) exit 0;; esac
+
+# لو FORCE نظّف الآن (should_bkp رجع مبكراً قبل aggressive_clean)
+[ "$DEC" = "FORCE" ] && aggressive_clean
 
 TS_LABEL=$(date +"%Y-%m-%d_%H-%M-%S")
 TS_ISO=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
@@ -96,7 +91,6 @@ if [ "$_db_bytes" -gt "$CHUNK_BYTES" ]; then
   split -b 18M -d -a 3 "$TMP/db.sql.gz" "$TMP/parts/db.sql.gz.part_"
   rm -f "$TMP/db.sql.gz"
   TOTAL_PARTS=$(find "$TMP/parts/" -type f | wc -l | tr -d ' ')
-  echo "  ✂️ تم التقسيم لـ $TOTAL_PARTS أجزاء"
 else
   mv "$TMP/db.sql.gz" "$TMP/parts/db.sql.gz"
   TOTAL_PARTS=1
@@ -104,19 +98,23 @@ fi
 
 echo "  📤 رفع $TOTAL_PARTS ملف..."
 
+# FIX #1 #2: استخدام while read من file بدل pipe
+# يضمن FILE_COUNT و LAST_MSG_ID و UPLOAD_OK تتحدث في نفس الـ shell
+find "$TMP/parts/" -type f | sort > "$TMP/parts_list.txt"
+
 FILE_COUNT=0
 UPLOAD_OK=true
 LAST_MSG_ID=""
 
-# FIX #1: استخدام find بدل ls لتجنب مشاكل المسافات
-find "$TMP/parts/" -type f | sort | while read -r _fp; do
+while IFS= read -r _fp; do
   _fn=$(basename "$_fp")
   _fs=$(du -h "$_fp" | cut -f1)
+  FILE_COUNT=$((FILE_COUNT + 1))
 
   _caption="📦 #n8n_backup
 🆔 ${TS_LABEL}
 📄 ${_fn}
-📊 جزء $((FILE_COUNT + 1)) من ${TOTAL_PARTS}
+📊 جزء ${FILE_COUNT} من ${TOTAL_PARTS}
 💾 ${_fs}"
 
   _try=0; _ok_flag=""
@@ -132,43 +130,46 @@ find "$TMP/parts/" -type f | sort | while read -r _fp; do
 
     if [ "$_rok" = "true" ] && [ -n "$_mid" ]; then
       _ok_flag="yes"
-      FILE_COUNT=$((FILE_COUNT + 1))
       LAST_MSG_ID="$_mid"
       echo "    ✅ $_fn ($_fs)"
       break
     fi
-
     _try=$((_try + 1))
     sleep 3
   done
 
-  [ -n "$_ok_flag" ] || { UPLOAD_OK=false; break; }
+  if [ -z "$_ok_flag" ]; then
+    UPLOAD_OK=false
+    echo "    ❌ فشل: $_fn"
+    break
+  fi
   sleep 1
-done
+done < "$TMP/parts_list.txt"
 
-[ "$UPLOAD_OK" = "true" ] || { echo "  ❌ فشل الرفع"; exit 1; }
+if [ "$UPLOAD_OK" = "false" ]; then
+  echo "  ❌ فشل الرفع"; exit 1
+fi
 
-# لو أكثر من جزء — أرسل رسالة manifest نصية وثبّتها
 if [ "$TOTAL_PARTS" -gt 1 ]; then
   _mresp=$(curl -sS -X POST "${TG}/sendMessage" \
     -d "chat_id=${TG_CHAT_ID}" \
     --data-urlencode "text=🗂️ #n8n_manifest
 🆔 ${TS_LABEL}
 📦 أجزاء: ${TOTAL_PARTS}
-💾 الحجم: ${DB_SIZE}" \
+💾 ${DB_SIZE}" \
     2>/dev/null || true)
   LAST_MSG_ID=$(echo "$_mresp" | jq -r '.result.message_id // empty' 2>/dev/null || true)
 fi
 
+# FIX #2: الآن LAST_MSG_ID فيها القيمة الصحيحة
 if [ -n "$LAST_MSG_ID" ]; then
   curl -sS -X POST "${TG}/pinChatMessage" \
     -d "chat_id=${TG_CHAT_ID}" \
     -d "message_id=${LAST_MSG_ID}" \
     -d "disable_notification=true" >/dev/null 2>&1 || true
-  echo "  📌 مثبّت!"
+  echo "  📌 مثبّت! (msg=$LAST_MSG_ID)"
 fi
 
-# FIX #4: احفظ الـ signature الحالي بعد التنظيف
 cat > "$STATE" <<EOF
 ID=$TS_LABEL
 TS=$TS_ISO
