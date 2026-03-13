@@ -28,7 +28,7 @@ services:
       - key: EXECUTIONS_DATA_SAVE_ON_SUCCESS
         value: "none"
       - key: EXECUTIONS_DATA_SAVE_ON_ERROR
-        value: "all"
+        value: "none"
       - key: EXECUTIONS_DATA_SAVE_MANUAL_EXECUTIONS
         value: "false"
 
