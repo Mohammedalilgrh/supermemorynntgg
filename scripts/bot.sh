@@ -6,14 +6,14 @@ set -eu
 : "${TG_ADMIN_ID:?}"
 
 N8N_DIR="${N8N_DIR:-/home/node/.n8n}"
+WORK="${WORK/-/backup-data}"
 WORK="${WORK:-/backup-data}"
-
 TG="https://api.telegram.org/bot${TG_BOT_TOKEN}"
 
-# FIX #8: نحفظ OFFSET في file بدل متغير (subshell لا يرجع المتغيرات)
-OFFSET_FILE="/tmp/tg_offset_$$"
-echo "0" > "$OFFSET_FILE"
-trap 'rm -f "$OFFSET_FILE"' EXIT
+# FIX #6: path ثابت بدل PID — يبقى نفسه حتى لو crash وrestart
+OFFSET_FILE="/tmp/tg_bot_offset"
+UPDATES_FILE="/tmp/tg_bot_updates"
+[ -f "$OFFSET_FILE" ] || echo "0" > "$OFFSET_FILE"
 
 send_msg() {
   curl -sS -X POST "${TG}/sendMessage" \
@@ -49,9 +49,7 @@ show_main() {
 
 do_status() {
   _db="$N8N_DIR/database.sqlite"
-  _db_size="—"; _db_tables=0; _bin_size="0"
-  _last_bkp="—"; _last_size="—"
-
+  _db_size="—"; _db_tables=0; _bin_size="0"; _last_bkp="—"; _last_size="—"
   [ -f "$_db" ] && {
     _db_size=$(du -h "$_db" 2>/dev/null | cut -f1)
     _db_tables=$(sqlite3 "$_db" "SELECT count(*) FROM sqlite_master WHERE type='table';" 2>/dev/null || echo 0)
@@ -62,7 +60,6 @@ do_status() {
     _last_bkp=$(grep '^ID=' "$WORK/.backup_state" 2>/dev/null | cut -d= -f2 || echo "—")
     _last_size=$(grep '^SZ=' "$WORK/.backup_state" 2>/dev/null | cut -d= -f2 || echo "—")
   }
-
   send_keyboard "📊 <b>الحالة</b>\n\n🗄️ DB: <code>$_db_size</code> ($_db_tables جدول)\n📁 Binary: <code>${_bin_size}MB</code>\n💾 آخر باك أب: <code>$_last_bkp</code> ($_last_size)\n⏰ <code>$(date -u '+%H:%M:%S UTC')</code>" "$MAIN_MENU"
 }
 
@@ -85,8 +82,6 @@ do_cleanup() {
     _before=$(du -sm "$N8N_DIR/binaryData" 2>/dev/null | cut -f1 || echo 0)
   find "$N8N_DIR/binaryData" -type f -delete 2>/dev/null || true
   find "$N8N_DIR/binaryData" -type d -empty -delete 2>/dev/null || true
-
-  # FIX #7: نفس منطق backup.sh — نمسح كل التنفيذات
   _db_before=$(du -h "$N8N_DIR/database.sqlite" 2>/dev/null | cut -f1 || echo "—")
   sqlite3 "$N8N_DIR/database.sqlite" "
     DELETE FROM execution_entity;
@@ -96,7 +91,6 @@ do_cleanup() {
     VACUUM;
   " 2>/dev/null || true
   _db_after=$(du -h "$N8N_DIR/database.sqlite" 2>/dev/null | cut -f1 || echo "—")
-
   send_keyboard "🧹 <b>تنظيف تم!</b>\n\n📁 Binary: <code>${_before}MB → 0MB</code>\n🗄️ DB: <code>$_db_before → $_db_after</code>" "$MAIN_MENU"
 }
 
@@ -117,31 +111,28 @@ while true; do
   RESULTS=$(echo "$UPDATES" | jq -r '.result // []' 2>/dev/null)
   [ "$RESULTS" != "[]" ] || continue
 
-  # FIX #8: نكتب الـ updates لـ file ونلوبها بدون subshell pipe
-  echo "$RESULTS" | jq -c '.[]' 2>/dev/null > "/tmp/tg_updates_$$" || true
+  # FIX #7: path ثابت للـ updates file
+  echo "$RESULTS" | jq -c '.[]' 2>/dev/null > "$UPDATES_FILE" || true
 
   while IFS= read -r update; do
     _uid=$(echo "$update" | jq -r '.update_id' 2>/dev/null)
-    # FIX #8: نحدث الـ offset في الـ file
     echo $((_uid + 1)) > "$OFFSET_FILE"
 
     _text=$(echo "$update" | jq -r '.message.text // empty' 2>/dev/null)
     _from=$(echo "$update" | jq -r '.message.from.id // 0' 2>/dev/null)
-
     if [ -n "$_text" ] && [ "$_from" = "$TG_ADMIN_ID" ]; then
       case "$_text" in
-        /start|/menu) show_main ;;
-        /status)      do_status ;;
+        /start|/menu)  show_main ;;
+        /status)       do_status ;;
         /backup|/save) do_backup_now ;;
-        /info|/help)  do_info ;;
-        /clean*)      do_cleanup ;;
+        /info|/help)   do_info ;;
+        /clean*)       do_cleanup ;;
       esac
     fi
 
     _cb_id=$(echo "$update" | jq -r '.callback_query.id // empty' 2>/dev/null)
     _cb_data=$(echo "$update" | jq -r '.callback_query.data // empty' 2>/dev/null)
     _cb_from=$(echo "$update" | jq -r '.callback_query.from.id // 0' 2>/dev/null)
-
     if [ -n "$_cb_id" ] && [ "$_cb_from" = "$TG_ADMIN_ID" ]; then
       answer_callback "$_cb_id" "⏳"
       case "$_cb_data" in
@@ -152,10 +143,8 @@ while true; do
         info)       do_info ;;
       esac
     fi
-  done < "/tmp/tg_updates_$$"
-  rm -f "/tmp/tg_updates_$$"
+  done < "$UPDATES_FILE"
 
-  # تحديث الـ OFFSET من آخر update
   _last=$(echo "$RESULTS" | jq -r '.[-1].update_id // empty' 2>/dev/null)
   [ -n "$_last" ] && echo $((_last + 1)) > "$OFFSET_FILE"
 done
