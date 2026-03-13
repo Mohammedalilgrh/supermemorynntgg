@@ -58,12 +58,9 @@ PINNED=$(curl -sS "${TG}/getChat?chat_id=${TG_CHAT_ID}" 2>/dev/null || true)
 
 _pin_fname=$(echo "$PINNED"   | jq -r '.result.pinned_message.document.file_name // empty' 2>/dev/null || true)
 _pin_fid=$(echo "$PINNED"     | jq -r '.result.pinned_message.document.file_id   // empty' 2>/dev/null || true)
-
-# FIX #4: الـ manifest نصية → نقرأ .text، الـ document → نقرأ .caption
 _pin_caption=$(echo "$PINNED" | jq -r '.result.pinned_message.caption // empty' 2>/dev/null || true)
 _pin_text=$(echo "$PINNED"    | jq -r '.result.pinned_message.text    // empty' 2>/dev/null || true)
 
-# نجمع النصين للبحث عن BACKUP_ID
 _pin_all_text="${_pin_caption} ${_pin_text} ${_pin_fname}"
 echo "  📌 الملف المثبّت: ${_pin_fname:-رسالة نصية}"
 
@@ -73,7 +70,7 @@ BACKUP_ID=$(echo "$_pin_all_text" \
 echo "  🆔 Backup ID: ${BACKUP_ID:-غير محدد}"
 
 # ════════════════════════════════════════════
-# الخطوة 2: ملف واحد مباشر (ليس manifest)
+# الخطوة 2: ملف واحد مباشر
 # ════════════════════════════════════════════
 if [ -n "$_pin_fid" ]; then
   _is_single=false
@@ -123,7 +120,19 @@ if [ -n "$BACKUP_ID" ]; then
     _parts_count=$(find "$TMP/parts/" -name "*.part_*" -type f 2>/dev/null | wc -l | tr -d ' ')
     if [ "$_parts_count" -gt 0 ]; then
       echo "  🔗 تجميع $_parts_count أجزاء..."
-      find "$TMP/parts/" -name "*.part_*" -type f | sort | xargs cat > "$TMP/db.sql.gz" 2>/dev/null || true
+
+      # FIX #7: بدل xargs cat (يمسح الـ output عند كل batch)
+      # نلوب على الملفات مرتّبة ونضيفهم واحد بواحد بـ >>
+      _first=true
+      find "$TMP/parts/" -name "*.part_*" -type f | sort | while IFS= read -r _pf; do
+        if [ "$_first" = "true" ]; then
+          cat "$_pf" > "$TMP/db.sql.gz"
+          _first=false
+        else
+          cat "$_pf" >> "$TMP/db.sql.gz"
+        fi
+      done
+
       if [ -s "$TMP/db.sql.gz" ]; then
         if restore_from_gz "$TMP/db.sql.gz"; then
           echo "🎉 تم من الأجزاء المجمّعة!"; exit 0
