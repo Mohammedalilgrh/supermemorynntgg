@@ -6,26 +6,32 @@ set -eu
 : "${TG_ADMIN_ID:?}"
 
 N8N_DIR="${N8N_DIR:-/home/node/.n8n}"
-WORK="${WORK/-/backup-data}"
+# FIX #1: حذف السطر الخطأ WORK="${WORK/-/backup-data}" — كان يمسح أول "-"
 WORK="${WORK:-/backup-data}"
 TG="https://api.telegram.org/bot${TG_BOT_TOKEN}"
 
-# FIX #6: path ثابت بدل PID — يبقى نفسه حتى لو crash وrestart
 OFFSET_FILE="/tmp/tg_bot_offset"
 UPDATES_FILE="/tmp/tg_bot_updates"
 [ -f "$OFFSET_FILE" ] || echo "0" > "$OFFSET_FILE"
 
+# FIX #2: send_msg و send_keyboard يستخدمان --data-urlencode لأمان JSON
+# بدل بناء JSON يدوي يكسر عند الأحرف الخاصة أو العربية
 send_msg() {
   curl -sS -X POST "${TG}/sendMessage" \
-    -H "Content-Type: application/json" \
-    -d "{\"chat_id\":${TG_ADMIN_ID},\"text\":\"$1\",\"parse_mode\":\"HTML\"}" \
+    -d "chat_id=${TG_ADMIN_ID}" \
+    -d "parse_mode=HTML" \
+    --data-urlencode "text=$1" \
     2>/dev/null || true
 }
 
 send_keyboard() {
+  # الـ text قد يكون طويل أو يحتوي على أحرف خاصة → urlencode
+  # الـ reply_markup هو JSON جاهز → نمرره كـ -d عادي
   curl -sS -X POST "${TG}/sendMessage" \
-    -H "Content-Type: application/json" \
-    -d "{\"chat_id\":${TG_ADMIN_ID},\"text\":\"$1\",\"parse_mode\":\"HTML\",\"reply_markup\":$2}" \
+    -d "chat_id=${TG_ADMIN_ID}" \
+    -d "parse_mode=HTML" \
+    --data-urlencode "text=$1" \
+    -d "reply_markup=$2" \
     2>/dev/null || true
 }
 
@@ -44,7 +50,9 @@ MAIN_MENU='{
 }'
 
 show_main() {
-  send_keyboard "🤖 <b>لوحة التحكم</b>\n\nاختار:" "$MAIN_MENU"
+  send_keyboard "🤖 لوحة التحكم
+
+اختار:" "$MAIN_MENU"
 }
 
 do_status() {
@@ -60,7 +68,12 @@ do_status() {
     _last_bkp=$(grep '^ID=' "$WORK/.backup_state" 2>/dev/null | cut -d= -f2 || echo "—")
     _last_size=$(grep '^SZ=' "$WORK/.backup_state" 2>/dev/null | cut -d= -f2 || echo "—")
   }
-  send_keyboard "📊 <b>الحالة</b>\n\n🗄️ DB: <code>$_db_size</code> ($_db_tables جدول)\n📁 Binary: <code>${_bin_size}MB</code>\n💾 آخر باك أب: <code>$_last_bkp</code> ($_last_size)\n⏰ <code>$(date -u '+%H:%M:%S UTC')</code>" "$MAIN_MENU"
+  send_keyboard "📊 الحالة
+
+🗄️ DB: $_db_size ($_db_tables جدول)
+📁 Binary: ${_bin_size}MB
+💾 آخر باك أب: $_last_bkp ($_last_size)
+⏰ $(date -u '+%H:%M:%S UTC')" "$MAIN_MENU"
 }
 
 do_backup_now() {
@@ -70,7 +83,7 @@ do_backup_now() {
   if echo "$_out" | grep -q "اكتمل"; then
     _id=$(grep '^ID=' "$WORK/.backup_state" 2>/dev/null | cut -d= -f2 || echo "?")
     _sz=$(grep '^SZ=' "$WORK/.backup_state" 2>/dev/null | cut -d= -f2 || echo "?")
-    send_keyboard "✅ تم! <code>$_id</code> ($_sz)" "$MAIN_MENU"
+    send_keyboard "✅ تم! $_id ($_sz)" "$MAIN_MENU"
   else
     send_keyboard "❌ فشل" "$MAIN_MENU"
   fi
@@ -91,11 +104,24 @@ do_cleanup() {
     VACUUM;
   " 2>/dev/null || true
   _db_after=$(du -h "$N8N_DIR/database.sqlite" 2>/dev/null | cut -f1 || echo "—")
-  send_keyboard "🧹 <b>تنظيف تم!</b>\n\n📁 Binary: <code>${_before}MB → 0MB</code>\n🗄️ DB: <code>$_db_before → $_db_after</code>" "$MAIN_MENU"
+  send_keyboard "🧹 تنظيف تم!
+
+📁 Binary: ${_before}MB → 0MB
+🗄️ DB: $_db_before → $_db_after" "$MAIN_MENU"
 }
 
 do_info() {
-  send_keyboard "ℹ️ <b>المعلومات</b>\n\n💡 يحفظ <code>db.sql.gz</code>\n= workflows + credentials + إعدادات\n\n📤 <b>باك أب:</b>\n  فحص كل 5 دقائق\n  أقل فترة: 10 دقائق\n  إجباري: كل 6 ساعات\n\n📝 /start /status /backup /clean" "$MAIN_MENU"
+  send_keyboard "ℹ️ المعلومات
+
+💡 يحفظ db.sql.gz
+= workflows + credentials + إعدادات
+
+📤 باك أب:
+  فحص كل 5 دقائق
+  أقل فترة: 10 دقائق
+  إجباري: كل 6 ساعات
+
+📝 /start /status /backup /clean" "$MAIN_MENU"
 }
 
 echo "🤖 البوت جاهز..."
@@ -111,7 +137,6 @@ while true; do
   RESULTS=$(echo "$UPDATES" | jq -r '.result // []' 2>/dev/null)
   [ "$RESULTS" != "[]" ] || continue
 
-  # FIX #7: path ثابت للـ updates file
   echo "$RESULTS" | jq -c '.[]' 2>/dev/null > "$UPDATES_FILE" || true
 
   while IFS= read -r update; do
