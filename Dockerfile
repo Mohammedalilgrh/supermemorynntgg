@@ -32,6 +32,22 @@ COPY --from=tools /etc/ssl/certs/  /etc/ssl/certs/
 ENV LD_LIBRARY_PATH="/usr/local/lib:/usr/local/lib2:$LD_LIBRARY_PATH"
 ENV PATH="/usr/local/bin:$PATH"
 
+
+# تثبيت Piper
+RUN wget https://github.com/rhasspy/piper/releases/download/v1.2.0/piper_linux_x86_64.tar.gz \
+ && tar -xzf piper_linux_x86_64.tar.gz \
+ && mv piper /usr/local/bin/
+
+# مجلد الأصوات
+RUN mkdir -p /voices
+
+# تحميل الصوتين العربيين
+RUN wget -O /voices/ar_JO-kareem-medium.onnx https://huggingface.co/rhasspy/piper-voices/resolve/main/ar/ar_JO/kareem/medium/ar_JO-kareem-medium.onnx
+RUN wget -O /voices/ar_JO-kareem-high.onnx https://huggingface.co/rhasspy/piper-voices/resolve/main/ar/ar_JO/kareem/high/ar_JO-kareem-high.onnx
+
+# تحميل الصوت الإنجليزي
+RUN wget -O /voices/en_US-lessac-medium.onnx https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx
+
 # FFmpeg environment variables for full compatibility
 ENV FFMPEG_PATH="/usr/local/bin/ffmpeg"
 ENV FFPROBE_PATH="/usr/local/bin/ffprobe"
