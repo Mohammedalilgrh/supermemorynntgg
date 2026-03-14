@@ -33,10 +33,11 @@ ENV LD_LIBRARY_PATH="/usr/local/lib:/usr/local/lib2:$LD_LIBRARY_PATH"
 ENV PATH="/usr/local/bin:$PATH"
 
 
-# تثبيت Piper
-RUN wget https://github.com/rhasspy/piper/releases/download/v1.2.0/piper_linux_x86_64.tar.gz \
- && tar -xzf piper_linux_x86_64.tar.gz \
- && mv piper /usr/local/bin/
+# تثبيت Piper - احدث اصدار مستقر
+RUN wget -O piper.tar.gz https://github.com/rhasspy/piper/releases/download/v2024.11.05/piper_amd64.tar.gz \
+ && tar -xzf piper.tar.gz \
+ && mv piper/piper /usr/local/bin/ \
+ && rm -rf piper piper.tar.gz
 
 # مجلد الأصوات
 RUN mkdir -p /voices
@@ -69,26 +70,19 @@ RUN ln -sf /usr/local/bin/ffmpeg /usr/bin/ffmpeg && \
     ln -sf /usr/local/bin/ffmpeg /bin/ffmpeg && \
     ln -sf /usr/local/bin/ffprobe /bin/ffprobe
 
-# ===== هذا الجزء المهم الناقص - الخطوط والـ fontconfig =====
-RUN apk add --no-cache \
+# ===== الخطوط والـ fontconfig معدلة لـ Debian =====
+RUN apt-get update && apt-get install -y --no-install-recommends \
     fontconfig \
-    ttf-dejavu \
-    font-noto \
-    font-noto-arabic \
-    font-noto-extra \
-    libass \
-    fribidi \
-    harfbuzz \
-    freetype \
-    libstdc++ \
-    libgcc \
-    libgomp \
-    zlib \
-    expat \
-    2>/dev/null || true
+    fonts-dejavu \
+    fonts-noto \
+    fonts-noto-arabic \
+    libass9 \
+    libfribidi0 \
+    libharfbuzz0b \
+    && rm -rf /var/lib/apt/lists/*
 
 # تحديث cache الخطوط
-RUN fc-cache -fv 2>/dev/null || true
+RUN fc-cache -fv
 
 RUN mkdir -p /scripts /backup-data /home/node/.n8n && \
     chown -R node:node /home/node/.n8n /scripts /backup-data
