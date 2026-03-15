@@ -73,20 +73,7 @@ RUN apk add --no-cache \
 
 # تحديث cache الخطوط
 RUN fc-cache -fv 2>/dev/null || true
-# ===== Piper TTS =================================================
-RUN apt-get update && \
-    apt-get install -y wget python3 python3-pip && \
-    rm -rf /var/lib/apt/lists/*
 
-RUN pip3 install --no-cache-dir piper-tts
-
-RUN mkdir -p /voices && \
-    wget -O /voices/en_US-lessac-medium.onnx \
-    https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx && \
-    wget -O /voices/en_US-lessac-medium.onnx.json \
-    https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json
-# ================================================================
-# ================================================================
 RUN mkdir -p /scripts /backup-data /home/node/.n8n && \
     chown -R node:node /home/node/.n8n /scripts /backup-data
 
