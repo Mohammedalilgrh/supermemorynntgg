@@ -74,10 +74,11 @@ RUN apk add --no-cache \
 #=== تحديث cache الخطوط
 RUN fc-cache -fv 2>/dev/null || true
 # ===== Microsoft Edge TTS ===========================================================================
-RUN apk add --no-cache \
-    nodejs \
-    npm && \
-    npm install -g edge-tts
+RUN apt-get update && \
+    apt-get install -y nodejs npm && \
+    npm install -g edge-tts && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
     # ==========================================================================================
 RUN mkdir -p /scripts /backup-data /home/node/.n8n && \
     chown -R node:node /home/node/.n8n /scripts /backup-data
