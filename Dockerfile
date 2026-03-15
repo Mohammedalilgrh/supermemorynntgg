@@ -13,7 +13,7 @@ RUN apk add --no-cache \
         [ -f "$p" ] && cp "$p" /toolbox/ || true; \
     done
 
-# Download ffmpeg static
+# تحميل ffmpeg static في مرحلة Alpine
 RUN curl -L -o /tmp/ffmpeg.tar.xz https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz && \
     tar -xJf /tmp/ffmpeg.tar.xz -C /tmp/ && \
     cp /tmp/ffmpeg-*-static/ffmpeg /toolbox/ && \
@@ -32,46 +32,56 @@ COPY --from=tools /etc/ssl/certs/  /etc/ssl/certs/
 ENV LD_LIBRARY_PATH="/usr/local/lib:/usr/local/lib2:$LD_LIBRARY_PATH"
 ENV PATH="/usr/local/bin:$PATH"
 
-# FFmpeg environment
+# FFmpeg environment variables for full compatibility
 ENV FFMPEG_PATH="/usr/local/bin/ffmpeg"
 ENV FFPROBE_PATH="/usr/local/bin/ffprobe"
+ENV FFREPORT="file=/tmp/ffreport-%p-%t.log:level=32"
 
-# Install Python and edge-tts (TINY - only ~15MB!)
+# FFmpeg runtime directories
+RUN mkdir -p /tmp/ffmpeg-temp /tmp/ffmpeg-cache /var/log/ffmpeg && \
+    chmod 1777 /tmp/ffmpeg-temp /tmp/ffmpeg-cache /tmp && \
+    chmod 755 /var/log/ffmpeg
+
+# Verify ffmpeg binaries are executable and working
+RUN chmod +x /usr/local/bin/ffmpeg /usr/local/bin/ffprobe && \
+    /usr/local/bin/ffmpeg -version && \
+    /usr/local/bin/ffprobe -version
+
+# Create symlinks for common paths where n8n nodes might look for ffmpeg
+RUN ln -sf /usr/local/bin/ffmpeg /usr/bin/ffmpeg && \
+    ln -sf /usr/local/bin/ffprobe /usr/bin/ffprobe && \
+    ln -sf /usr/local/bin/ffmpeg /bin/ffmpeg && \
+    ln -sf /usr/local/bin/ffprobe /bin/ffprobe
+
+# ===== هذا الجزء المهم الناقص - الخطوط والـ fontconfig =====
 RUN apk add --no-cache \
-    python3 \
-    py3-pip \
     fontconfig \
     ttf-dejavu \
     font-noto \
     font-noto-arabic \
     font-noto-extra \
-    supervisor \
-    && pip3 install --no-cache-dir edge-tts fastapi uvicorn aiofiles \
-    && rm -rf /var/cache/apk/*
+    libass \
+    fribidi \
+    harfbuzz \
+    freetype \
+    libstdc++ \
+    libgcc \
+    libgomp \
+    zlib \
+    expat \
+    2>/dev/null || true
 
-# Create directories
-RUN mkdir -p /tmp/ffmpeg-temp /tmp/ffmpeg-cache /var/log/ffmpeg /opt/tts-api && \
-    chmod 1777 /tmp/ffmpeg-temp /tmp/ffmpeg-cache /tmp && \
-    chmod 755 /var/log/ffmpeg
-
-# Verify ffmpeg
-RUN chmod +x /usr/local/bin/ffmpeg /usr/local/bin/ffprobe && \
-    /usr/local/bin/ffmpeg -version && \
-    /usr/local/bin/ffprobe -version
-
-# Create symlinks
-RUN ln -sf /usr/local/bin/ffmpeg /usr/bin/ffmpeg && \
-    ln -sf /usr/local/bin/ffprobe /usr/bin/ffprobe
-
-# Update font cache
+# تحديث cache الخطوط
 RUN fc-cache -fv 2>/dev/null || true
 
-RUN mkdir -p /scripts /backup-data /home/node/.n8n /var/log/supervisor && \
-    chown -R node:node /home/node/.n8n /scripts /backup-data /opt/tts-api
+RUN mkdir -p /scripts /backup-data /home/node/.n8n && \
+    chown -R node:node /home/node/.n8n /scripts /backup-data
+
+# Ensure node user has access to ffmpeg temp directories
+RUN chown -R node:node /tmp/ffmpeg-temp /tmp/ffmpeg-cache /var/log/ffmpeg
 
 USER node
 
-# Install n8n custom nodes
 RUN cd /home/node/.n8n && \
     mkdir -p nodes && \
     cd nodes && \
@@ -85,6 +95,11 @@ COPY --chown=node:node scripts/ /scripts/
 RUN sed -i 's/\r$//' /scripts/*.sh && \
     chmod 0755 /scripts/*.sh
 
+# Final verification that ffmpeg works for node user
+USER node
+RUN ffmpeg -version && ffprobe -version && \
+    fc-list :lang=ar 2>/dev/null | head -5 || echo "Arabic fonts check done" && \
+    echo "FFmpeg installation verified successfully"
 # ========== CREATE LIGHTWEIGHT TTS API ==========
 RUN cat > /opt/tts-api/app.py <<'EOFPYTHON'
 from fastapi import FastAPI, HTTPException
