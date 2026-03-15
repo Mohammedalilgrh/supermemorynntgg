@@ -71,12 +71,18 @@ RUN apk add --no-cache \
     expat \
     2>/dev/null || true
 
+
 # تحديث cache الخطوط
 RUN fc-cache -fv 2>/dev/null || true
 
+# ===== Microsoft Edge TTS =====
+RUN apk add --no-cache nodejs npm && \
+    npm install -g edge-tts
+    
 RUN mkdir -p /scripts /backup-data /home/node/.n8n && \
     chown -R node:node /home/node/.n8n /scripts /backup-data
 
+# =====================================================================================
 # Ensure node user has access to ffmpeg temp directories
 RUN chown -R node:node /tmp/ffmpeg-temp /tmp/ffmpeg-cache /var/log/ffmpeg
 
