@@ -1,6 +1,5 @@
 FROM alpine:3.20 AS tools
 
-# تثبيت الأدوات في Alpine
 RUN apk add --no-cache \
       curl jq sqlite tar gzip xz \
       coreutils findutils ca-certificates wget
@@ -39,7 +38,7 @@ FROM docker.n8n.io/n8nio/n8n:2.6.2
 
 USER root
 
-# نسخ ffmpeg و ffprobe فقط (static binaries)
+# نسخ ffmpeg و ffprobe فقط (static binaries - لا تحتاج مكتبات)
 COPY --from=tools /toolbox/ffmpeg   /usr/local/bin/ffmpeg
 COPY --from=tools /toolbox/ffprobe  /usr/local/bin/ffprobe
 
@@ -49,33 +48,28 @@ COPY --from=tools /toolbox/piper-full /opt/piper
 # نسخ الأصوات
 COPY --from=tools /voices /voices
 
-# تثبيت الأدوات الأساسية والخطوط
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# n8n:2.6.2 مبني على Alpine - نستخدم apk وليس apt-get
+RUN apk add --no-cache \
+    fontconfig \
+    ttf-dejavu \
+    font-noto \
+    font-noto-arabic \
+    font-noto-extra \
+    libass \
+    fribidi \
+    harfbuzz \
+    freetype \
+    libstdc++ \
+    libgcc \
+    libgomp \
+    zlib \
+    expat \
+    libsndfile \
     curl \
     jq \
-    sqlite3 \
+    sqlite \
     wget \
-    fontconfig \
-    fonts-dejavu \
-    fonts-noto \
-    fonts-noto-core \
-    libass9 \
-    libfribidi0 \
-    libharfbuzz0b \
-    libfreetype6 \
-    libstdc++6 \
-    libgomp1 \
-    zlib1g \
-    libexpat1 \
-    libsndfile1 \
-    && rm -rf /var/lib/apt/lists/*
-
-# محاولة تثبيت الخطوط العربية
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    fonts-arabeyes \
-    fonts-kacst \
-    2>/dev/null || true && \
-    rm -rf /var/lib/apt/lists/*
+    bash
 
 # تحديث cache الخطوط
 RUN fc-cache -fv
@@ -103,10 +97,8 @@ ENV VOICES_PATH="/voices"
 # إنشاء المجلدات المؤقتة
 RUN mkdir -p /tmp/ffmpeg-temp /tmp/piper-temp /var/log/ffmpeg && \
     chmod 1777 /tmp/ffmpeg-temp /tmp/piper-temp /tmp && \
-    chmod 755 /var/log/ffmpeg /voices
-
-# صلاحيات الأصوات
-RUN chmod 644 /voices/*.onnx /voices/*.json
+    chmod 755 /var/log/ffmpeg /voices && \
+    chmod 644 /voices/*.onnx /voices/*.json
 
 # إنشاء مجلدات العمل
 RUN mkdir -p /scripts /backup-data /home/node/.n8n && \
