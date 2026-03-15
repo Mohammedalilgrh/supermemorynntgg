@@ -1,103 +1,64 @@
 FROM alpine:3.20 AS tools
 
+# تثبيت الأدوات في Alpine
 RUN apk add --no-cache \
       curl jq sqlite tar gzip xz \
-      coreutils findutils ca-certificates wget && \
-    mkdir -p /toolbox && \
-    for cmd in curl jq sqlite3 split sha256sum \
-               stat du sort tail awk xargs find \
-               wc cut tr gzip tar cat date sleep \
-               mkdir rm ls grep sed head touch \
-               cp mv basename expr wget; do \
-      p="$(which $cmd 2>/dev/null)" && \
-        [ -f "$p" ] && cp "$p" /toolbox/ || true; \
-    done
+      coreutils findutils ca-certificates wget
 
 # تحميل ffmpeg static
-RUN curl -L -o /tmp/ffmpeg.tar.xz https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz && \
+RUN mkdir -p /toolbox && \
+    curl -L -o /tmp/ffmpeg.tar.xz https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz && \
     tar -xJf /tmp/ffmpeg.tar.xz -C /tmp/ && \
     cp /tmp/ffmpeg-*-static/ffmpeg /toolbox/ && \
     cp /tmp/ffmpeg-*-static/ffprobe /toolbox/ && \
+    chmod +x /toolbox/ffmpeg /toolbox/ffprobe && \
     rm -rf /tmp/ffmpeg-*-static /tmp/ffmpeg.tar.xz
 
-# تحميل Piper - الرابط الصحيح
+# تحميل Piper
 RUN mkdir -p /piper-build && \
     cd /piper-build && \
-    wget -q --show-progress https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_linux_x86_64.tar.gz && \
+    wget -q https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_linux_x86_64.tar.gz && \
     tar -xzf piper_linux_x86_64.tar.gz && \
-    cp piper/piper /toolbox/ && \
-    cp -r piper/espeak-ng-data /toolbox/ && \
-    cp piper/lib*.so* /toolbox/ 2>/dev/null || true && \
-    chmod +x /toolbox/piper && \
+    cp -r piper /toolbox/piper-full && \
+    chmod +x /toolbox/piper-full/piper && \
     rm -rf /piper-build
 
 # تحميل الأصوات
-RUN mkdir -p /voices-temp && \
-    wget -q -O /voices-temp/ar_JO-kareem-medium.onnx \
+RUN mkdir -p /voices && \
+    wget -q -O /voices/ar_JO-kareem-medium.onnx \
       "https://huggingface.co/rhasspy/piper-voices/resolve/main/ar/ar_JO/kareem/medium/ar_JO-kareem-medium.onnx" && \
-    wget -q -O /voices-temp/ar_JO-kareem-medium.onnx.json \
+    wget -q -O /voices/ar_JO-kareem-medium.onnx.json \
       "https://huggingface.co/rhasspy/piper-voices/resolve/main/ar/ar_JO/kareem/medium/ar_JO-kareem-medium.onnx.json" && \
-    wget -q -O /voices-temp/en_US-lessac-medium.onnx \
+    wget -q -O /voices/en_US-lessac-medium.onnx \
       "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx" && \
-    wget -q -O /voices-temp/en_US-lessac-medium.onnx.json \
+    wget -q -O /voices/en_US-lessac-medium.onnx.json \
       "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json"
 
+# ========================================
 FROM docker.n8n.io/n8nio/n8n:2.6.2
 
 USER root
 
-# نسخ الأدوات
-COPY --from=tools /toolbox/        /usr/local/bin/
-COPY --from=tools /usr/lib/        /usr/local/lib/
-COPY --from=tools /lib/            /usr/local/lib2/
-COPY --from=tools /etc/ssl/certs/  /etc/ssl/certs/
+# نسخ ffmpeg و ffprobe فقط (static binaries)
+COPY --from=tools /toolbox/ffmpeg   /usr/local/bin/ffmpeg
+COPY --from=tools /toolbox/ffprobe  /usr/local/bin/ffprobe
+
+# نسخ Piper مع كل ملفاته
+COPY --from=tools /toolbox/piper-full /opt/piper
 
 # نسخ الأصوات
-COPY --from=tools /voices-temp/    /voices/
+COPY --from=tools /voices /voices
 
-# نسخ espeak-ng-data لـ Piper
-RUN mkdir -p /usr/local/share/piper
-COPY --from=tools /toolbox/espeak-ng-data /usr/local/share/piper/espeak-ng-data
-
-ENV LD_LIBRARY_PATH="/usr/local/lib:/usr/local/lib2:/usr/local/bin:$LD_LIBRARY_PATH"
-ENV PATH="/usr/local/bin:$PATH"
-
-# FFmpeg environment variables
-ENV FFMPEG_PATH="/usr/local/bin/ffmpeg"
-ENV FFPROBE_PATH="/usr/local/bin/ffprobe"
-ENV FFREPORT="file=/tmp/ffreport-%p-%t.log:level=32"
-
-# Piper environment variables
-ENV PIPER_PATH="/usr/local/bin/piper"
-ENV VOICES_PATH="/voices"
-ENV PIPER_ESPEAK_DATA="/usr/local/share/piper/espeak-ng-data"
-
-# إنشاء المجلدات المؤقتة
-RUN mkdir -p /tmp/ffmpeg-temp /tmp/ffmpeg-cache /var/log/ffmpeg /tmp/piper-temp && \
-    chmod 1777 /tmp/ffmpeg-temp /tmp/ffmpeg-cache /tmp /tmp/piper-temp && \
-    chmod 755 /var/log/ffmpeg /voices && \
-    chmod 644 /voices/*.onnx /voices/*.json 2>/dev/null || true
-
-# صلاحيات التشغيل
-RUN chmod +x /usr/local/bin/ffmpeg /usr/local/bin/ffprobe /usr/local/bin/piper
-
-# Symlinks لـ ffmpeg
-RUN ln -sf /usr/local/bin/ffmpeg /usr/bin/ffmpeg && \
-    ln -sf /usr/local/bin/ffprobe /usr/bin/ffprobe && \
-    ln -sf /usr/local/bin/ffmpeg /bin/ffmpeg && \
-    ln -sf /usr/local/bin/ffprobe /bin/ffprobe
-
-# Symlinks لـ piper
-RUN ln -sf /usr/local/bin/piper /usr/bin/piper && \
-    ln -sf /usr/local/bin/piper /bin/piper
-
-# تثبيت الخطوط والمكتبات
+# تثبيت الأدوات الأساسية والخطوط
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    jq \
+    sqlite3 \
+    wget \
     fontconfig \
     fonts-dejavu \
     fonts-noto \
     fonts-noto-core \
-    fonts-noto-ui-core \
     libass9 \
     libfribidi0 \
     libharfbuzz0b \
@@ -119,13 +80,38 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # تحديث cache الخطوط
 RUN fc-cache -fv
 
-# إنشاء المجلدات
-RUN mkdir -p /scripts /backup-data /home/node/.n8n && \
-    chown -R node:node /home/node/.n8n /scripts /backup-data /tmp/piper-temp
+# صلاحيات FFmpeg
+RUN chmod +x /usr/local/bin/ffmpeg /usr/local/bin/ffprobe
 
-# صلاحيات للمجلدات
-RUN chown -R node:node /tmp/ffmpeg-temp /tmp/ffmpeg-cache /var/log/ffmpeg && \
-    chmod -R 755 /voices
+# Symlinks لـ FFmpeg
+RUN ln -sf /usr/local/bin/ffmpeg /usr/bin/ffmpeg && \
+    ln -sf /usr/local/bin/ffprobe /usr/bin/ffprobe
+
+# صلاحيات Piper وإنشاء symlink
+RUN chmod +x /opt/piper/piper && \
+    ln -sf /opt/piper/piper /usr/local/bin/piper && \
+    ln -sf /opt/piper/piper /usr/bin/piper
+
+# متغيرات البيئة
+ENV PATH="/usr/local/bin:/opt/piper:$PATH"
+ENV LD_LIBRARY_PATH="/opt/piper:$LD_LIBRARY_PATH"
+ENV FFMPEG_PATH="/usr/local/bin/ffmpeg"
+ENV FFPROBE_PATH="/usr/local/bin/ffprobe"
+ENV PIPER_PATH="/opt/piper/piper"
+ENV VOICES_PATH="/voices"
+
+# إنشاء المجلدات المؤقتة
+RUN mkdir -p /tmp/ffmpeg-temp /tmp/piper-temp /var/log/ffmpeg && \
+    chmod 1777 /tmp/ffmpeg-temp /tmp/piper-temp /tmp && \
+    chmod 755 /var/log/ffmpeg /voices
+
+# صلاحيات الأصوات
+RUN chmod 644 /voices/*.onnx /voices/*.json
+
+# إنشاء مجلدات العمل
+RUN mkdir -p /scripts /backup-data /home/node/.n8n && \
+    chown -R node:node /home/node/.n8n /scripts /backup-data \
+    /tmp/ffmpeg-temp /tmp/piper-temp /var/log/ffmpeg
 
 # تثبيت Instagram node
 USER node
@@ -141,25 +127,30 @@ USER root
 # نسخ السكريبتات
 COPY --chown=node:node scripts/ /scripts/
 
-RUN sed -i 's/\r$//' /scripts/*.sh && \
-    chmod 0755 /scripts/*.sh
+RUN sed -i 's/\r$//' /scripts/*.sh 2>/dev/null || true && \
+    chmod 0755 /scripts/*.sh 2>/dev/null || true
 
 # التحقق النهائي
 USER node
 
-RUN echo "=== FFmpeg ===" && \
+RUN echo "========== VERIFICATION ==========" && \
+    echo "" && \
+    echo "--- FFmpeg ---" && \
     ffmpeg -version | head -1 && \
     echo "" && \
-    echo "=== Piper ===" && \
-    (piper --help 2>&1 | head -3 || echo "Piper installed") && \
+    echo "--- FFprobe ---" && \
+    ffprobe -version | head -1 && \
     echo "" && \
-    echo "=== Voices ===" && \
+    echo "--- Piper ---" && \
+    /opt/piper/piper --help 2>&1 | head -2 || echo "Piper ready" && \
+    echo "" && \
+    echo "--- Voices ---" && \
     ls -la /voices/ && \
     echo "" && \
-    echo "=== Arabic Fonts ===" && \
-    (fc-list :lang=ar | head -5 || echo "Fonts OK") && \
+    echo "--- Arabic Fonts ---" && \
+    fc-list :lang=ar | head -3 || echo "Fonts OK" && \
     echo "" && \
-    echo "=== SUCCESS ==="
+    echo "========== ALL READY ==========="
 
 WORKDIR /home/node
 
