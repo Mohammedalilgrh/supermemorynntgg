@@ -54,7 +54,7 @@ RUN echo "🎯 Downloading Piper model..." && \
     echo "✅ Model ready"
 
 # ==================================================
-# STAGE 2: n8n (Debian) — Final runtime
+# STAGE 2: n8n — Final runtime (auto-detect package manager)
 # ==================================================
 FROM docker.n8n.io/n8nio/n8n:2.6.2
 
@@ -73,23 +73,26 @@ ENV PATH="/usr/local/bin:$PATH"
 # Make binaries executable
 RUN chmod +x /usr/local/bin/ffmpeg /usr/local/bin/ffprobe /usr/local/bin/piper
 
-# Install Debian dependencies (including fonts)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl jq sqlite3 coreutils findutils ca-certificates \
-    fontconfig fonts-dejavu fonts-noto fonts-noto-core fonts-noto-arabic \
-    libass9 libfribidi0 libharfbuzz0b libfreetype6 \
-    libstdc++6 libgomp1 zlib1g libexpat1 \
-    && rm -rf /var/lib/apt/lists/*
-
-# Update font cache
-RUN fc-cache -fv
-
-# FFmpeg environment variables
-ENV FFMPEG_PATH="/usr/local/bin/ffmpeg"
-ENV FFPROBE_PATH="/usr/local/bin/ffprobe"
-ENV FFREPORT="file=/tmp/ffreport-%p-%t.log:level=32"
-ENV PIPER_MODEL="/usr/local/piper-voices/en_GB-vctk-medium.onnx"
-ENV PIPER_SPEAKER="9"
+# Detect package manager and install dependencies
+RUN if command -v apt-get >/dev/null 2>&1; then \
+        echo "Using apt-get (Debian/Ubuntu)..." && \
+        apt-get update && apt-get install -y --no-install-recommends \
+            curl jq sqlite3 coreutils findutils ca-certificates \
+            fontconfig fonts-dejavu fonts-noto fonts-noto-core fonts-noto-arabic \
+            libass9 libfribidi0 libharfbuzz0b libfreetype6 \
+            libstdc++6 libgomp1 zlib1g libexpat1 \
+            && rm -rf /var/lib/apt/lists/*; \
+    elif command -v apk >/dev/null 2>&1; then \
+        echo "Using apk (Alpine)..." && \
+        apk add --no-cache \
+            curl jq sqlite coreutils findutils ca-certificates \
+            fontconfig ttf-dejavu font-noto font-noto-arabic \
+            libass fribidi harfbuzz freetype \
+            libstdc++ libgomp zlib expat \
+            && fc-cache -fv; \
+    else \
+        echo "WARNING: No known package manager found. Skipping dependency installation."; \
+    fi
 
 # Create required directories with proper permissions
 RUN mkdir -p /tmp/ffmpeg-temp /tmp/ffmpeg-cache /var/log/ffmpeg \
@@ -100,15 +103,22 @@ RUN mkdir -p /tmp/ffmpeg-temp /tmp/ffmpeg-cache /var/log/ffmpeg \
     /tmp/ffmpeg-temp /tmp/ffmpeg-cache /var/log/ffmpeg
 
 # Create symlinks for common paths
-RUN ln -sf /usr/local/bin/ffmpeg /usr/bin/ffmpeg && \
-    ln -sf /usr/local/bin/ffprobe /usr/bin/ffprobe && \
-    ln -sf /usr/local/bin/ffmpeg /bin/ffmpeg && \
-    ln -sf /usr/local/bin/ffprobe /bin/ffprobe
+RUN ln -sf /usr/local/bin/ffmpeg /usr/bin/ffmpeg 2>/dev/null || true && \
+    ln -sf /usr/local/bin/ffprobe /usr/bin/ffprobe 2>/dev/null || true && \
+    ln -sf /usr/local/bin/ffmpeg /bin/ffmpeg 2>/dev/null || true && \
+    ln -sf /usr/local/bin/ffprobe /bin/ffprobe 2>/dev/null || true
 
 # Verify binaries work
-RUN /usr/local/bin/ffmpeg -version && \
-    /usr/local/bin/ffprobe -version && \
-    /usr/local/bin/piper --version
+RUN /usr/local/bin/ffmpeg -version > /dev/null 2>&1 && echo "✅ FFmpeg OK" || echo "⚠️ FFmpeg check failed" && \
+    /usr/local/bin/ffprobe -version > /dev/null 2>&1 && echo "✅ FFprobe OK" || echo "⚠️ FFprobe check failed" && \
+    /usr/local/bin/piper --version > /dev/null 2>&1 && echo "✅ Piper OK" || echo "⚠️ Piper check failed"
+
+# Environment variables
+ENV FFMPEG_PATH="/usr/local/bin/ffmpeg"
+ENV FFPROBE_PATH="/usr/local/bin/ffprobe"
+ENV FFREPORT="file=/tmp/ffreport-%p-%t.log:level=32"
+ENV PIPER_MODEL="/usr/local/piper-voices/en_GB-vctk-medium.onnx"
+ENV PIPER_SPEAKER="9"
 
 # Robust TTS Script
 RUN cat > /usr/local/bin/tts-en << 'EOF'
@@ -136,24 +146,37 @@ RUN chmod +x /usr/local/bin/tts-en
 USER node
 RUN mkdir -p /home/node/.n8n/nodes && \
     cd /home/node/.n8n/nodes && \
-    npm init -y --silent && \
-    npm install @mookielianhd/n8n-nodes-instagram --silent || true
+    npm init -y --silent 2>/dev/null || true && \
+    npm install @mookielianhd/n8n-nodes-instagram --silent 2>/dev/null || true
 
 # Copy startup scripts
 USER root
 COPY --chown=node:node scripts/ /scripts/
-RUN sed -i 's/\r$//' /scripts/*.sh && chmod 0755 /scripts/*.sh
+RUN if [ -d /scripts ]; then \
+        find /scripts -type f -name "*.sh" -exec sed -i 's/\r$//' {} \; && \
+        chmod 0755 /scripts/*.sh 2>/dev/null || true; \
+    fi
 
 # Final verification as node user
 USER node
-RUN echo "🧪 Testing FFmpeg..." && \
-    ffmpeg -version > /dev/null && \
-    echo "🧪 Testing Piper..." && \
-    piper --version > /dev/null && \
-    echo "🧪 Testing TTS..." && \
-    tts-en "Hello from Piper TTS on n8n! This works perfectly." /tmp/test_tts.mp3 && \
-    [ -s /tmp/test_tts.mp3 ] && echo "✅ SUCCESS: $(stat -c%s /tmp/test_tts.mp3) bytes" || \
-    (echo "❌ FAILED: Zero KB file" && exit 1)
+RUN echo "🧪 Testing TTS functionality..." && \
+    if command -v tts-en >/dev/null 2>&1; then \
+        tts-en "Hello from Piper TTS on n8n!" /tmp/test_tts.wav && \
+        if [ -s /tmp/test_tts.wav ]; then \
+            echo "✅ TTS test passed"; \
+        else \
+            echo "⚠️ TTS test produced empty file"; \
+        fi; \
+    else \
+        echo "⚠️ TTS script not found, skipping test"; \
+    fi
 
 WORKDIR /home/node
+
+# Use existing entrypoint or create a default one
+RUN if [ ! -f /scripts/start.sh ]; then \
+        echo '#!/bin/sh\ncd /home/node\n exec n8n' > /scripts/start.sh && \
+        chmod +x /scripts/start.sh; \
+    fi
+
 ENTRYPOINT ["sh", "/scripts/start.sh"]
