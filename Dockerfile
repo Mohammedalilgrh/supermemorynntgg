@@ -11,15 +11,14 @@ RUN apk add --no-cache \
 # Directory to collect tools
 RUN mkdir -p /toolbox /tmp/piper-bin /tmp/piper-voices
 
-# === Download STATIC FFmpeg (musl-compatible static build) ===
-# Use Alpine-compatible static ffmpeg from static-ffmpeg.gitlab.io
+# === Download STATIC FFmpeg (Alpine-compatible static build) ===
 RUN curl -L -o /tmp/ffmpeg.tar.xz \
     https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-20240715-1212/ffmpeg-master-latest-alpine-amd64-static.tar.xz \
     && tar -xJf /tmp/ffmpeg.tar.xz -C /tmp --strip-components=1 \
     && cp /tmp/ffmpeg /tmp/ffprobe /toolbox/ \
     && rm -rf /tmp/ffmpeg*
 
-# === Download Piper (already statically linked Linux binary) ===
+# === Download Piper (statically linked Linux binary) ===
 RUN curl -L -o /tmp/piper.tar.gz \
     https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_linux_x86_64.tar.gz \
     && mkdir -p /tmp/piper-bin \
@@ -33,11 +32,6 @@ RUN mkdir -p /tmp/piper-voices \
        https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_GB/vctk/medium/en_GB-vctk-medium.onnx \
     && curl -L -o /tmp/piper-voices/en_GB-vctk-medium.onnx.json \
        https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_GB/vctk/medium/en_GB-vctk-medium.onnx.json
-
-# === Copy minimal required shared libs from Alpine (just in case) ===
-# Piper and static ffmpeg shouldn't need these, but fontconfig/harfbuzz may
-# But since we're not installing them here, we rely on host image later.
-# So skip copying libs — we handle fonts in final stage.
 
 # ==================================================
 # STAGE 2: n8n (Debian) — Final runtime
@@ -59,7 +53,7 @@ RUN chmod +x /usr/local/bin/ffmpeg /usr/local/bin/ffprobe /usr/local/bin/piper
 RUN ln -sf /usr/local/bin/ffmpeg /usr/bin/ffmpeg /bin/ffmpeg \
     && ln -sf /usr/local/bin/ffprobe /usr/bin/ffprobe /bin/ffprobe
 
-# Install Debian dependencies (fonts, libs for text rendering & optional fallbacks)
+# Install Debian dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl jq sqlite3 coreutils findutils ca-certificates \
     fontconfig fonts-dejavu fonts-noto fonts-noto-core fonts-noto-arabic \
@@ -121,7 +115,6 @@ case "${OUTPUT##*.}" in
         ;;
 esac
 EOF
-
 RUN chmod +x /usr/local/bin/tts-en
 
 # Install Instagram Node (as node user)
@@ -144,27 +137,18 @@ RUN sed -i 's/\r$//' /scripts/*.sh \
 
 # Final Verification (as node user)
 USER node
-RUN echo "🧪 Running final tests..."
-
-# Test FFmpeg
-echo "🔧 Testing FFmpeg..."
-/usr/local/bin/ffmpeg -version
-/usr/local/bin/ffprobe -version
-
-# Test Piper directly
-echo "🎙️ Testing Piper binary..."
-/usr/local/bin/piper --version
-
-# Test TTS generation
-echo "🔊 Generating test audio..."
-tts-en "Hello from Piper TTS on n8n! This works perfectly." /tmp/test_tts.mp3
-[ -s /tmp/test_tts.mp3 ] && echo "✅ Test MP3 generated: $(stat -c%s /tmp/test_tts.mp3) bytes" || echo "❌ MP3 generation failed"
-
-# List model files
-echo "📂 Piper voices:"
-ls -lh /usr/local/piper-voices/
-
-echo "✅ All tests passed. Build complete."
+RUN echo "🧪 Running final tests..." && \
+    echo "🔧 Testing FFmpeg..." && \
+    /usr/local/bin/ffmpeg -version && \
+    /usr/local/bin/ffprobe -version && \
+    echo "🎙️ Testing Piper binary..." && \
+    /usr/local/bin/piper --version && \
+    echo "🔊 Generating test audio..." && \
+    tts-en "Hello from Piper TTS on n8n! This works perfectly." /tmp/test_tts.mp3 && \
+    [ -s /tmp/test_tts.mp3 ] && echo "✅ Test MP3 generated: $(stat -c%s /tmp/test_tts.mp3) bytes" || (echo "❌ MP3 generation failed" && exit 1) && \
+    echo "📂 Piper voices:" && \
+    ls -lh /usr/local/piper-voices/ && \
+    echo "✅ All tests passed. Build complete."
 
 # Default working dir and entrypoint
 WORKDIR /home/node
