@@ -1,160 +1,119 @@
-FROM alpine:3.20 AS tools
-
-RUN apk add --no-cache \
-      curl jq sqlite tar gzip xz \
-      coreutils findutils ca-certificates && \
-    mkdir -p /toolbox && \
-    for cmd in curl jq sqlite3 split sha256sum \
-               stat du sort tail awk xargs find \
-               wc cut tr gzip tar cat date sleep \
-               mkdir rm ls grep sed head touch \
-               cp mv basename expr; do \
-      p="$(which $cmd 2>/dev/null)" && \
-        [ -f "$p" ] && cp "$p" /toolbox/ || true; \
-    done
-
-# تحميل ffmpeg static في مرحلة Alpine
-RUN curl -L -o /tmp/ffmpeg.tar.xz https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz && \
-    tar -xJf /tmp/ffmpeg.tar.xz -C /tmp/ && \
-    cp /tmp/ffmpeg-*-static/ffmpeg /toolbox/ && \
-    cp /tmp/ffmpeg-*-static/ffprobe /toolbox/ && \
-    rm -rf /tmp/ffmpeg-*-static /tmp/ffmpeg.tar.xz
-
-# تحميل Piper binary في مرحلة Alpine (حيث curl متاح بشكل موثوق)
-RUN curl -L -o /tmp/piper.tar.gz \
-    "https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_linux_x86_64.tar.gz" && \
-    mkdir -p /tmp/piper-bin && \
-    tar -xzf /tmp/piper.tar.gz -C /tmp/piper-bin --strip-components=1 && \
-    rm /tmp/piper.tar.gz
-
-# تحميل ملفات النموذج البريطاني en_GB-vctk-medium
-RUN mkdir -p /tmp/piper-voices && \
-    curl -L -o /tmp/piper-voices/en_GB-vctk-medium.onnx \
-    "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_GB/vctk/medium/en_GB-vctk-medium.onnx" && \
-    curl -L -o /tmp/piper-voices/en_GB-vctk-medium.onnx.json \
-    "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_GB/vctk/medium/en_GB-vctk-medium.onnx.json"
-
-# ─────────────────────────────────────────────────
 FROM docker.n8n.io/n8nio/n8n:2.6.2
 
 USER root
 
-COPY --from=tools /toolbox/           /usr/local/bin/
-COPY --from=tools /usr/lib/           /usr/local/lib/
-COPY --from=tools /lib/               /usr/local/lib2/
-COPY --from=tools /etc/ssl/certs/     /etc/ssl/certs/
-COPY --from=tools /tmp/piper-bin/     /usr/local/piper/
-COPY --from=tools /tmp/piper-voices/  /usr/local/piper-voices/
+# Install Debian-compatible system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl jq sqlite3 coreutils findutils ca-certificates \
+    fontconfig fonts-dejavu fonts-noto fonts-noto-core fonts-noto-arabic \
+    libass9 libfribidi0 libharfbuzz0b libfreetype6 libstdc++6 zlib1g libexpat1 \
+    && rm -rf /var/lib/apt/lists/*
 
-ENV LD_LIBRARY_PATH="/usr/local/lib:/usr/local/lib2:/usr/local/piper:$LD_LIBRARY_PATH"
+# Create required directories with proper permissions
+RUN mkdir -p /usr/local/piper /usr/local/piper-voices \
+    /tmp/ffmpeg-temp /tmp/ffmpeg-cache /var/log/ffmpeg \
+    /scripts /backup-data /home/node/.n8n/nodes \
+    && chown -R node:node /home/node/.n8n /scripts /backup-data \
+    && chmod 1777 /tmp/ffmpeg-temp /tmp/ffmpeg-cache /tmp \
+    && chmod 755 /var/log/ffmpeg
+
+# Download static FFmpeg (works on Debian without extra libs)
+RUN curl -L -o /tmp/ffmpeg.tar.xz https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz \
+    && tar -xJf /tmp/ffmpeg.tar.xz -C /tmp --strip-components=1 \
+    && cp /tmp/ffmpeg /tmp/ffprobe /usr/local/bin/ \
+    && chmod +x /usr/local/bin/ffmpeg /usr/local/bin/ffprobe \
+    && rm -rf /tmp/ffmpeg*
+
+# Download Piper static binary
+RUN curl -L -o /tmp/piper.tar.gz https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_linux_x86_64.tar.gz \
+    && tar -xzf /tmp/piper.tar.gz -C /usr/local/piper --strip-components=1 \
+    && chmod +x /usr/local/piper/piper \
+    && ln -sf /usr/local/piper/piper /usr/local/bin/piper \
+    && rm /tmp/piper.tar.gz
+
+# Download Piper British English model
+RUN curl -L -o /usr/local/piper-voices/en_GB-vctk-medium.onnx \
+    https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_GB/vctk/medium/en_GB-vctk-medium.onnx \
+    && curl -L -o /usr/local/piper-voices/en_GB-vctk-medium.onnx.json \
+    https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_GB/vctk/medium/en_GB-vctk-medium.onnx.json
+
+# Environment Variables
+ENV LD_LIBRARY_PATH="/usr/local/lib:/usr/local/piper:$LD_LIBRARY_PATH"
 ENV PATH="/usr/local/bin:/usr/local/piper:$PATH"
 
-# FFmpeg environment variables
+# FFmpeg Config
 ENV FFMPEG_PATH="/usr/local/bin/ffmpeg"
 ENV FFPROBE_PATH="/usr/local/bin/ffprobe"
 ENV FFREPORT="file=/tmp/ffreport-%p-%t.log:level=32"
 
-# Piper environment variables
+# Piper Config
 ENV PIPER_MODEL="/usr/local/piper-voices/en_GB-vctk-medium.onnx"
 ENV PIPER_SPEAKER="9"
 
-# FFmpeg runtime directories
-RUN mkdir -p /tmp/ffmpeg-temp /tmp/ffmpeg-cache /var/log/ffmpeg && \
-    chmod 1777 /tmp/ffmpeg-temp /tmp/ffmpeg-cache /tmp && \
-    chmod 755 /var/log/ffmpeg
+# FFmpeg Symlinks (for broad compatibility)
+RUN ln -sf /usr/local/bin/ffmpeg /usr/bin/ffmpeg \
+    && ln -sf /usr/local/bin/ffprobe /usr/bin/ffprobe \
+    && ln -sf /usr/local/bin/ffmpeg /bin/ffmpeg \
+    && ln -sf /usr/local/bin/ffprobe /bin/ffprobe
 
-# Verify ffmpeg
-RUN chmod +x /usr/local/bin/ffmpeg /usr/local/bin/ffprobe && \
-    /usr/local/bin/ffmpeg -version && \
-    /usr/local/bin/ffprobe -version
+# Update font cache for text rendering
+RUN fc-cache -fv
 
-# Symlinks for ffmpeg
-RUN ln -sf /usr/local/bin/ffmpeg /usr/bin/ffmpeg && \
-    ln -sf /usr/local/bin/ffprobe /usr/bin/ffprobe && \
-    ln -sf /usr/local/bin/ffmpeg /bin/ffmpeg && \
-    ln -sf /usr/local/bin/ffprobe /bin/ffprobe
-
-# ── الخطوط: نجرب apk (Alpine) وإلا apt-get (Debian) ──
-RUN (apk add --no-cache \
-      fontconfig ttf-dejavu font-noto font-noto-arabic font-noto-extra \
-      libass fribidi harfbuzz freetype libstdc++ libgcc libgomp zlib expat \
-      2>/dev/null) || \
-    (apt-get update -qq 2>/dev/null && apt-get install -y --no-install-recommends \
-      fontconfig fonts-dejavu fonts-noto fonts-noto-core \
-      libass9 libfribidi0 libharfbuzz0b libfreetype6 \
-      libstdc++6 zlib1g libexpat1 \
-      2>/dev/null && rm -rf /var/lib/apt/lists/*) || true
-
-RUN fc-cache -fv 2>/dev/null || true
-
-# ── Piper: إعداد البinary والسكريبت ──
-RUN chmod +x /usr/local/piper/piper && \
-    ln -sf /usr/local/piper/piper /usr/local/bin/piper
-
-# سكريبت tts-en: British voice speaker 9 — يخرج WAV أو MP3
+# Robust TTS Script with error handling
 RUN cat > /usr/local/bin/tts-en << 'EOF'
-#!/bin/sh
-# Piper TTS — en_GB-vctk-medium, speaker 9
-# Usage:
-#   tts-en "Hello there" /tmp/out.wav    -> WAV مباشرة
-#   tts-en "Hello there" /tmp/out.mp3    -> MP3 (تحويل تلقائي)
+#!/bin/bash
+set -euo pipefail
+
+# Validate input
+if [ -z "${1:-}" ]; then
+    echo "Error: No text provided"
+    exit 1
+fi
+
 TEXT="$1"
 OUTPUT="${2:-/tmp/tts_out.wav}"
+mkdir -p $(dirname "$OUTPUT")
 
 case "$OUTPUT" in
-  *.mp3)
-    TMP_WAV="/tmp/_piper_$$.wav"
-    echo "$TEXT" | piper \
-      --model /usr/local/piper-voices/en_GB-vctk-medium.onnx \
-      --speaker 9 \
-      --output_file "$TMP_WAV" && \
-    ffmpeg -y -i "$TMP_WAV" -codec:a libmp3lame -qscale:a 2 "$OUTPUT" 2>/dev/null && \
-    rm -f "$TMP_WAV"
-    echo "Done: $OUTPUT"
-    ;;
-  *)
-    echo "$TEXT" | piper \
-      --model /usr/local/piper-voices/en_GB-vctk-medium.onnx \
-      --speaker 9 \
-      --output_file "$OUTPUT"
-    echo "Done: $OUTPUT"
-    ;;
+    *.mp3)
+        TMP_WAV=$(mktemp /tmp/piper_XXXXXX.wav)
+        trap 'rm -f "$TMP_WAV"' EXIT
+        echo "$TEXT" | piper --model "$PIPER_MODEL" --speaker "$PIPER_SPEAKER" --output_file "$TMP_WAV"
+        ffmpeg -y -hide_banner -loglevel error -i "$TMP_WAV" -codec:a libmp3lame -qscale:a 2 "$OUTPUT"
+        echo "Success: MP3 saved to $OUTPUT"
+        ;;
+    *)
+        echo "$TEXT" | piper --model "$PIPER_MODEL" --speaker "$PIPER_SPEAKER" --output_file "$OUTPUT"
+        echo "Success: WAV saved to $OUTPUT"
+        ;;
 esac
 EOF
+
 RUN chmod +x /usr/local/bin/tts-en
 
-RUN mkdir -p /scripts /backup-data /home/node/.n8n && \
-    chown -R node:node /home/node/.n8n /scripts /backup-data
-
-RUN chown -R node:node /tmp/ffmpeg-temp /tmp/ffmpeg-cache /var/log/ffmpeg
-
+# Install n8n Instagram Node
 USER node
+RUN cd /home/node/.n8n/nodes \
+    && npm init -y --silent \
+    && npm install @mookielianhd/n8n-nodes-instagram --silent || true
 
-RUN cd /home/node/.n8n && \
-    mkdir -p nodes && \
-    cd nodes && \
-    npm init -y 2>/dev/null && \
-    npm install @mookielianhd/n8n-nodes-instagram 2>/dev/null || true
-
+# Setup Custom Start Script
 USER root
-
 COPY --chown=node:node scripts/ /scripts/
+RUN sed -i 's/\r$//' /scripts/*.sh \
+    && chmod 0755 /scripts/*.sh
 
-RUN sed -i 's/\r$//' /scripts/*.sh && \
-    chmod 0755 /scripts/*.sh
-
-# التحقق النهائي
+# Final Verification (ensures all tools work)
 USER node
-RUN ffmpeg -version && ffprobe -version && \
-    ls -lh /usr/local/piper-voices/ && \
-    echo "Hello Piper" | piper \
-      --model /usr/local/piper-voices/en_GB-vctk-medium.onnx \
-      --speaker 9 \
-      --output_file /tmp/test_piper.wav 2>/dev/null && \
-    echo "✅ Piper TTS working — en_GB speaker 9" || \
-    echo "⚠️ Piper test failed — check logs" && \
-    echo "✅ Build complete"
+RUN echo "=== Verifying FFmpeg ===" \
+    && ffmpeg -version \
+    && ffprobe -version \
+    && echo "=== Verifying Piper ===" \
+    && piper --version \
+    && echo "Testing TTS..." \
+    && tts-en "Hello! This is a working test of Piper TTS on n8n." /tmp/test_tts.mp3 \
+    && ls -lh /tmp/test_tts.mp3 \
+    && echo "=== All Tests Passed! ==="
 
 WORKDIR /home/node
-
 ENTRYPOINT ["sh", "/scripts/start.sh"]
