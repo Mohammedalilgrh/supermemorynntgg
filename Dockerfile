@@ -9,19 +9,16 @@ RUN apk add --no-cache \
 RUN mkdir -p /toolbox/bin /toolbox/lib /toolbox/espeak-ng-data /toolbox/piper-voices
 
 # Download FFmpeg static (amd64)
-RUN echo "Downloading FFmpeg..." && \
-    curl -fSL --connect-timeout 60 --retry 3 \
+RUN curl -fSL --connect-timeout 60 --retry 3 \
         "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz" \
         -o /tmp/ffmpeg.tar.xz && \
     tar -xJf /tmp/ffmpeg.tar.xz -C /tmp/ && \
     cp /tmp/ffmpeg-*-static/ffmpeg  /toolbox/bin/ && \
     cp /tmp/ffmpeg-*-static/ffprobe /toolbox/bin/ && \
-    rm -rf /tmp/ffmpeg-*-static /tmp/ffmpeg.tar.xz && \
-    echo "FFmpeg ready"
+    rm -rf /tmp/ffmpeg-*-static /tmp/ffmpeg.tar.xz
 
 # Download Piper + libs + espeak-ng-data
-RUN echo "Downloading Piper..." && \
-    mkdir -p /tmp/piper-full && \
+RUN mkdir -p /tmp/piper-full && \
     curl -fSL --connect-timeout 60 --retry 3 \
         "https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_linux_x86_64.tar.gz" \
         -o /tmp/piper.tar.gz && \
@@ -29,29 +26,22 @@ RUN echo "Downloading Piper..." && \
     cp /tmp/piper-full/piper /toolbox/bin/ && \
     find /tmp/piper-full -name "*.so*" -exec cp {} /toolbox/lib/ \; 2>/dev/null || true && \
     if [ -d /tmp/piper-full/espeak-ng-data ]; then \
-        cp -r /tmp/piper-full/espeak-ng-data/* /toolbox/espeak-ng-data/ && \
-        echo "espeak-ng-data copied"; \
-    else \
-        echo "No espeak-ng-data in package"; \
+        cp -r /tmp/piper-full/espeak-ng-data/* /toolbox/espeak-ng-data/; \
     fi && \
-    rm -rf /tmp/piper* && \
-    echo "Piper ready"
+    rm -rf /tmp/piper*
 
 # Download Piper voice model
-RUN echo "Downloading voice model..." && \
-    curl -fSL --connect-timeout 60 --retry 3 \
+RUN curl -fSL --connect-timeout 60 --retry 3 \
         "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_GB/vctk/medium/en_GB-vctk-medium.onnx" \
         -o /toolbox/piper-voices/en_GB-vctk-medium.onnx && \
     curl -fSL --connect-timeout 60 --retry 3 \
         "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_GB/vctk/medium/en_GB-vctk-medium.onnx.json" \
-        -o /toolbox/piper-voices/en_GB-vctk-medium.onnx.json && \
-    echo "Voice model ready"
+        -o /toolbox/piper-voices/en_GB-vctk-medium.onnx.json
 
 # ==================================================
-# STAGE 2: n8n — Final runtime (Debian-based)
-# NOTE: n8nio/n8n on Docker Hub is Debian by default
+# STAGE 2: n8n final image (Alpine-based)
 # ==================================================
-FROM n8nio/n8n:1.91.3
+FROM docker.n8n.io/n8nio/n8n:2.6.2
 
 USER root
 
@@ -72,30 +62,28 @@ ENV PIPER_MODEL="/usr/local/piper-voices/en_GB-vctk-medium.onnx"
 ENV PIPER_SPEAKER="9"
 ENV ESPEAK_DATA_PATH="/usr/local/share/espeak-ng-data"
 
-# --- Debian packages ---
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    jq \
-    sqlite3 \
+# --- Alpine packages (apk only — no onnxruntime, included in piper binary) ---
+RUN /sbin/apk add --no-cache \
     fontconfig \
-    fonts-dejavu \
-    fonts-noto \
-    fonts-noto-arabic \
-    libass9 \
-    libfribidi0 \
-    libharfbuzz0b \
-    libfreetype6 \
-    libstdc++6 \
-    libgcc-s1 \
-    libgomp1 \
-    zlib1g \
-    libexpat1 \
+    ttf-dejavu \
+    font-noto \
+    font-noto-arabic \
+    libass \
+    fribidi \
+    harfbuzz \
+    freetype \
+    libstdc++ \
+    libgcc \
+    libgomp \
+    zlib \
+    expat \
     espeak-ng \
-    espeak-ng-data \
+    sqlite \
+    jq \
+    curl \
     ca-certificates \
     && fc-cache -fv \
-    && rm -rf /var/lib/apt/lists/* \
-    && echo "Debian packages installed"
+    && echo "Alpine packages installed"
 
 # --- Make binaries executable + symlinks ---
 RUN chmod +x \
@@ -181,15 +169,11 @@ RUN find /scripts -type f -name "*.sh" \
     chmod 0755 /scripts/*.sh 2>/dev/null || true
 
 # --- Final verification ---
-RUN echo "=== Verify FFmpeg ===" && \
-    ffmpeg -version | head -n1 && \
-    echo "=== Verify Piper ===" && \
-    test -x /usr/local/bin/piper && echo "piper OK" && \
-    echo "=== Verify TTS ===" && \
-    test -x /usr/local/bin/tts-en && echo "tts-en OK" && \
-    echo "=== Verify model ===" && \
+RUN ffmpeg -version | head -n1 && \
+    test -x /usr/local/bin/piper   && echo "piper OK" && \
+    test -x /usr/local/bin/tts-en  && echo "tts-en OK" && \
     test -f /usr/local/piper-voices/en_GB-vctk-medium.onnx && echo "model OK" && \
-    echo "=== All checks passed ==="
+    echo "All checks passed"
 
 WORKDIR /home/node
 ENTRYPOINT ["sh", "/scripts/start.sh"]
