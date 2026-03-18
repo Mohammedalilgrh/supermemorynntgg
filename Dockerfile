@@ -64,15 +64,15 @@ COPY --from=tools /toolbox/bin/          /usr/local/bin/
 COPY --from=tools /toolbox/lib/          /usr/local/lib/
 COPY --from=tools /tmp/piper-voices/     /usr/local/piper-voices/
 
-# Copy espeak-ng data if it exists (separate copy to handle optional directory)
-COPY --from=tools /toolbox/espeak-ng-data/ /usr/local/share/espeak-ng-data/ 2>/dev/null || true
+# Copy espeak-ng data if it exists (without any redirection in the COPY command)
+COPY --from=tools /toolbox/espeak-ng-data/ /usr/local/share/espeak-ng-data/ || true
 
 # Also copy system libraries from tools stage
 COPY --from=tools /usr/lib/              /usr/local/lib/
 COPY --from=tools /lib/                   /usr/local/lib2/
 COPY --from=tools /etc/ssl/certs/         /etc/ssl/certs/
 
-# Set library path - VERY IMPORTANT for Piper to find its libraries
+# Set library path
 ENV LD_LIBRARY_PATH="/usr/local/lib:/usr/local/lib2:/usr/lib:/lib:$LD_LIBRARY_PATH"
 ENV PATH="/usr/local/bin:$PATH"
 
@@ -114,14 +114,14 @@ RUN apk add --no-cache \
     && fc-cache -fv
 
 # Create symlinks
-RUN ln -sf /usr/local/bin/ffmpeg /usr/bin/ffmpeg 2>/dev/null || true && \
-    ln -sf /usr/local/bin/ffprobe /usr/bin/ffprobe 2>/dev/null || true && \
-    ln -sf /usr/local/bin/ffmpeg /bin/ffmpeg 2>/dev/null || true && \
-    ln -sf /usr/local/bin/ffprobe /bin/ffprobe 2>/dev/null || true && \
-    ln -sf /usr/local/bin/piper /usr/bin/piper 2>/dev/null || true && \
-    ln -sf /usr/local/bin/piper /bin/piper 2>/dev/null || true
+RUN ln -sf /usr/local/bin/ffmpeg /usr/bin/ffmpeg || true && \
+    ln -sf /usr/local/bin/ffprobe /usr/bin/ffprobe || true && \
+    ln -sf /usr/local/bin/ffmpeg /bin/ffmpeg || true && \
+    ln -sf /usr/local/bin/ffprobe /bin/ffprobe || true && \
+    ln -sf /usr/local/bin/piper /usr/bin/piper || true && \
+    ln -sf /usr/local/bin/piper /bin/piper || true
 
-# Create TTS script
+# Create TTS script with better error handling and debugging
 RUN cat > /usr/local/bin/tts-en << 'EOF'
 #!/bin/sh
 set -e
@@ -139,30 +139,54 @@ mkdir -p "$(dirname "$OUTPUT")"
 export LD_LIBRARY_PATH="/usr/local/lib:/usr/local/lib2:/usr/lib:/lib:${LD_LIBRARY_PATH}"
 
 echo "🔊 Generating speech for: $TEXT"
+echo "📁 Output: $OUTPUT"
+echo "📚 Library path: $LD_LIBRARY_PATH"
+
+# Check if piper exists
+if ! command -v piper >/dev/null 2>&1; then
+    echo "❌ piper command not found" >&2
+    exit 1
+fi
+
+# Check if model exists
+if [ ! -f "$PIPER_MODEL" ]; then
+    echo "❌ Piper model not found at $PIPER_MODEL" >&2
+    exit 1
+fi
 
 case "${OUTPUT##*.}" in
     mp3)
         TMP_WAV="/tmp/tts_temp_$$.wav"
         trap 'rm -f "$TMP_WAV"' EXIT
         
-        # Generate WAV first
+        echo "🔄 Generating WAV temporarily..."
         echo "$TEXT" | piper \
             --model "$PIPER_MODEL" \
             --speaker "$PIPER_SPEAKER" \
-            --output_file "$TMP_WAV" 2>&1
+            --output_file "$TMP_WAV"
         
-        # Convert to MP3
-        ffmpeg -y -i "$TMP_WAV" -codec:a libmp3lame -qscale:a 2 "$OUTPUT" 2>&1
+        echo "🔄 Converting to MP3..."
+        ffmpeg -y -i "$TMP_WAV" -codec:a libmp3lame -qscale:a 2 "$OUTPUT"
         echo "✅ MP3 saved to: $OUTPUT"
         ;;
     wav|*)
+        echo "🔄 Generating WAV directly..."
         echo "$TEXT" | piper \
             --model "$PIPER_MODEL" \
             --speaker "$PIPER_SPEAKER" \
-            --output_file "$OUTPUT" 2>&1
+            --output_file "$OUTPUT"
         echo "✅ WAV saved to: $OUTPUT"
         ;;
 esac
+
+# Show file size
+if [ -f "$OUTPUT" ]; then
+    SIZE=$(ls -lh "$OUTPUT" | awk '{print $5}')
+    echo "📊 File size: $SIZE"
+else
+    echo "❌ Output file not created"
+    exit 1
+fi
 EOF
 
 RUN chmod +x /usr/local/bin/tts-en
@@ -185,29 +209,31 @@ USER root
 COPY --chown=node:node scripts/ /scripts/
 
 RUN if [ -d /scripts ]; then \
-        find /scripts -type f -name "*.sh" -exec sed -i 's/\r$//' {} \; 2>/dev/null || true && \
+        find /scripts -type f -name "*.sh" -exec sed -i 's/\r$//' {} \; 2>/dev/null || true; \
         chmod 0755 /scripts/*.sh 2>/dev/null || true; \
     fi
 
-# Verify installations (non-fatal)
-RUN echo "🔍 Verifying installations..." && \
+# Verify ffmpeg (non-fatal)
+RUN echo "🔍 Verifying FFmpeg..." && \
     ffmpeg -version | head -n1 && \
-    ffprobe -version | head -n1 && \
-    echo "✅ FFmpeg OK" || echo "⚠️ FFmpeg check failed"
+    echo "✅ FFmpeg OK"
 
-# Test if piper works (but don't fail the build)
+# Test piper (but don't fail build)
 RUN echo "🔍 Testing Piper..." && \
-    if /usr/local/bin/piper --version 2>/dev/null; then \
-        echo "✅ Piper OK"; \
+    if ldd /usr/local/bin/piper 2>/dev/null; then \
+        echo "✅ Piper libraries linked"; \
     else \
-        echo "⚠️ Piper check failed (will work at runtime with libraries)"; \
-    fi
+        echo "⚠️ Cannot check library linking"; \
+    fi && \
+    echo "✅ Piper binary present"
 
 WORKDIR /home/node
 
 # Create default start script if none exists
 RUN if [ ! -f /scripts/start.sh ]; then \
-        echo '#!/bin/sh\ncd /home/node\nn8n' > /scripts/start.sh && \
+        echo '#!/bin/sh' > /scripts/start.sh && \
+        echo 'cd /home/node' >> /scripts/start.sh && \
+        echo 'exec n8n' >> /scripts/start.sh && \
         chmod +x /scripts/start.sh; \
     fi
 
