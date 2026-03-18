@@ -33,10 +33,13 @@ RUN echo "🎯 Downloading Piper with dependencies..." && \
     # Copy binary
     cp /tmp/piper-full/piper /toolbox/bin/ && \
     # Copy all shared libraries
-    cp /tmp/piper-full/*.so* /toolbox/lib/ || true && \
+    cp /tmp/piper-full/*.so* /toolbox/lib/ 2>/dev/null || true && \
     # Copy espeak-ng data if exists
     if [ -d /tmp/piper-full/espeak-ng-data ]; then \
         cp -r /tmp/piper-full/espeak-ng-data /toolbox/; \
+        echo "✅ espeak-ng data copied"; \
+    else \
+        echo "ℹ️ No espeak-ng data found in Piper package"; \
     fi && \
     rm -rf /tmp/piper* && \
     echo "✅ Piper with libraries ready"
@@ -64,13 +67,18 @@ COPY --from=tools /toolbox/bin/          /usr/local/bin/
 COPY --from=tools /toolbox/lib/          /usr/local/lib/
 COPY --from=tools /tmp/piper-voices/     /usr/local/piper-voices/
 
-# Copy espeak-ng data if it exists (without any redirection in the COPY command)
-COPY --from=tools /toolbox/espeak-ng-data/ /usr/local/share/espeak-ng-data/ || true
+# Copy system libraries from tools stage
+COPY --from=tools /usr/lib/              /usr/local/lib/ || true
+COPY --from=tools /lib/                  /usr/local/lib2/ || true
+COPY --from=tools /etc/ssl/certs/        /etc/ssl/certs/ || true
 
-# Also copy system libraries from tools stage
-COPY --from=tools /usr/lib/              /usr/local/lib/
-COPY --from=tools /lib/                   /usr/local/lib2/
-COPY --from=tools /etc/ssl/certs/         /etc/ssl/certs/
+# Copy espeak-ng data only if it exists (using a more robust method)
+RUN if [ -d /toolbox/espeak-ng-data ]; then \
+        cp -r /toolbox/espeak-ng-data /usr/local/share/; \
+        echo "✅ espeak-ng data copied to final image"; \
+    else \
+        echo "ℹ️ No espeak-ng data to copy, will use system packages"; \
+    fi
 
 # Set library path
 ENV LD_LIBRARY_PATH="/usr/local/lib:/usr/local/lib2:/usr/lib:/lib:$LD_LIBRARY_PATH"
@@ -110,18 +118,19 @@ RUN apk add --no-cache \
     zlib \
     expat \
     espeak-ng \
+    espeak-ng-data \
     onnxruntime \
     && fc-cache -fv
 
 # Create symlinks
-RUN ln -sf /usr/local/bin/ffmpeg /usr/bin/ffmpeg || true && \
-    ln -sf /usr/local/bin/ffprobe /usr/bin/ffprobe || true && \
-    ln -sf /usr/local/bin/ffmpeg /bin/ffmpeg || true && \
-    ln -sf /usr/local/bin/ffprobe /bin/ffprobe || true && \
-    ln -sf /usr/local/bin/piper /usr/bin/piper || true && \
-    ln -sf /usr/local/bin/piper /bin/piper || true
+RUN ln -sf /usr/local/bin/ffmpeg /usr/bin/ffmpeg 2>/dev/null || true && \
+    ln -sf /usr/local/bin/ffprobe /usr/bin/ffprobe 2>/dev/null || true && \
+    ln -sf /usr/local/bin/ffmpeg /bin/ffmpeg 2>/dev/null || true && \
+    ln -sf /usr/local/bin/ffprobe /bin/ffprobe 2>/dev/null || true && \
+    ln -sf /usr/local/bin/piper /usr/bin/piper 2>/dev/null || true && \
+    ln -sf /usr/local/bin/piper /bin/piper 2>/dev/null || true
 
-# Create TTS script with better error handling and debugging
+# Create TTS script with better error handling
 RUN cat > /usr/local/bin/tts-en << 'EOF'
 #!/bin/sh
 set -e
@@ -140,7 +149,6 @@ export LD_LIBRARY_PATH="/usr/local/lib:/usr/local/lib2:/usr/lib:/lib:${LD_LIBRAR
 
 echo "🔊 Generating speech for: $TEXT"
 echo "📁 Output: $OUTPUT"
-echo "📚 Library path: $LD_LIBRARY_PATH"
 
 # Check if piper exists
 if ! command -v piper >/dev/null 2>&1; then
@@ -218,14 +226,10 @@ RUN echo "🔍 Verifying FFmpeg..." && \
     ffmpeg -version | head -n1 && \
     echo "✅ FFmpeg OK"
 
-# Test piper (but don't fail build)
-RUN echo "🔍 Testing Piper..." && \
-    if ldd /usr/local/bin/piper 2>/dev/null; then \
-        echo "✅ Piper libraries linked"; \
-    else \
-        echo "⚠️ Cannot check library linking"; \
-    fi && \
-    echo "✅ Piper binary present"
+# Test library dependencies
+RUN echo "🔍 Checking Piper libraries..." && \
+    ldd /usr/local/bin/piper 2>/dev/null | head -10 || true && \
+    echo "✅ Library check complete"
 
 WORKDIR /home/node
 
@@ -233,6 +237,7 @@ WORKDIR /home/node
 RUN if [ ! -f /scripts/start.sh ]; then \
         echo '#!/bin/sh' > /scripts/start.sh && \
         echo 'cd /home/node' >> /scripts/start.sh && \
+        echo 'export LD_LIBRARY_PATH="/usr/local/lib:/usr/local/lib2:/usr/lib:/lib"' >> /scripts/start.sh && \
         echo 'exec n8n' >> /scripts/start.sh && \
         chmod +x /scripts/start.sh; \
     fi
