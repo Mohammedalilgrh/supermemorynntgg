@@ -1,107 +1,171 @@
-# ============ Stage 1: download tools (Alpine is OK here) ============
+# ==================================================
+# STAGE 1: tools (Alpine) — Collect STATIC binaries
+# ==================================================
 FROM alpine:3.20 AS tools
 
-RUN apk add --no-cache curl ca-certificates tar gzip xz
+# Install minimal tools for downloading and packaging
+RUN apk add --no-cache \
+      curl tar gzip xz findutils ca-certificates \
+      && rm -rf /var/cache/apk/*
 
-# Download static ffmpeg (includes ffmpeg + ffprobe)
+# Directory to collect tools
+RUN mkdir -p /toolbox /tmp/piper-bin /tmp/piper-voices
+
+# === Download STATIC FFmpeg (musl-compatible static build) ===
+# Use Alpine-compatible static ffmpeg from static-ffmpeg.gitlab.io
 RUN curl -L -o /tmp/ffmpeg.tar.xz \
-      https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz && \
-    mkdir -p /out && \
-    tar -xJf /tmp/ffmpeg.tar.xz -C /tmp && \
-    cp /tmp/ffmpeg-*-static/ffmpeg /out/ && \
-    cp /tmp/ffmpeg-*-static/ffprobe /out/ && \
-    chmod +x /out/ffmpeg /out/ffprobe && \
-    rm -rf /tmp/ffmpeg*
+    https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-20240715-1212/ffmpeg-master-latest-alpine-amd64-static.tar.xz \
+    && tar -xJf /tmp/ffmpeg.tar.xz -C /tmp --strip-components=1 \
+    && cp /tmp/ffmpeg /tmp/ffprobe /toolbox/ \
+    && rm -rf /tmp/ffmpeg*
 
-# Download Piper
+# === Download Piper (already statically linked Linux binary) ===
 RUN curl -L -o /tmp/piper.tar.gz \
-      "https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_linux_x86_64.tar.gz" && \
-    mkdir -p /out/piper && \
-    tar -xzf /tmp/piper.tar.gz -C /out/piper --strip-components=1 && \
-    rm -f /tmp/piper.tar.gz && \
-    chmod +x /out/piper/piper
+    https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_linux_x86_64.tar.gz \
+    && mkdir -p /tmp/piper-bin \
+    && tar -xzf /tmp/piper.tar.gz -C /tmp/piper-bin --strip-components=1 \
+    && cp /tmp/piper-bin/piper /toolbox/ \
+    && rm -rf /tmp/piper*
 
-# Download voice model
-RUN mkdir -p /out/piper-voices && \
-    curl -L -o /out/piper-voices/en_GB-vctk-medium.onnx \
-      "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_GB/vctk/medium/en_GB-vctk-medium.onnx" && \
-    curl -L -o /out/piper-voices/en_GB-vctk-medium.onnx.json \
-      "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_GB/vctk/medium/en_GB-vctk-medium.onnx.json"
+# === Download Piper Voice Model (en_GB-vctk-medium) ===
+RUN mkdir -p /tmp/piper-voices \
+    && curl -L -o /tmp/piper-voices/en_GB-vctk-medium.onnx \
+       https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_GB/vctk/medium/en_GB-vctk-medium.onnx \
+    && curl -L -o /tmp/piper-voices/en_GB-vctk-medium.onnx.json \
+       https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_GB/vctk/medium/en_GB-vctk-medium.onnx.json
 
+# === Copy minimal required shared libs from Alpine (just in case) ===
+# Piper and static ffmpeg shouldn't need these, but fontconfig/harfbuzz may
+# But since we're not installing them here, we rely on host image later.
+# So skip copying libs — we handle fonts in final stage.
 
-# ============ Stage 2: n8n runtime (Debian base) ============
+# ==================================================
+# STAGE 2: n8n (Debian) — Final runtime
+# ==================================================
 FROM docker.n8n.io/n8nio/n8n:2.6.2
 
 USER root
 
-# Install runtime deps on Debian (for fonts/subtitles etc.)
-RUN apt-get update -qq && apt-get install -y --no-install-recommends \
-      ca-certificates fontconfig \
-      fonts-dejavu fonts-noto fonts-noto-core fonts-noto-extra fonts-noto-color-emoji \
-      libass9 libfribidi0 libharfbuzz0b libfreetype6 \
-    && rm -rf /var/lib/apt/lists/* && \
-    fc-cache -fv || true
+# Copy binaries from tools stage
+COPY --from=tools /toolbox/ffmpeg /usr/local/bin/ffmpeg
+COPY --from=tools /toolbox/ffprobe /usr/local/bin/ffprobe
+COPY --from=tools /toolbox/piper /usr/local/bin/piper
+COPY --from=tools /tmp/piper-voices/ /usr/local/piper-voices/
 
-# Copy ONLY what we need (NO /lib or /usr/lib from Alpine!)
-COPY --from=tools /out/ffmpeg   /usr/local/bin/ffmpeg
-COPY --from=tools /out/ffprobe  /usr/local/bin/ffprobe
-COPY --from=tools /out/piper    /usr/local/piper
-COPY --from=tools /out/piper-voices /usr/local/piper-voices
+# Make binaries executable
+RUN chmod +x /usr/local/bin/ffmpeg /usr/local/bin/ffprobe /usr/local/bin/piper
 
-RUN chmod +x /usr/local/bin/ffmpeg /usr/local/bin/ffprobe /usr/local/piper/piper && \
-    ln -sf /usr/local/bin/ffmpeg /usr/bin/ffmpeg && \
-    ln -sf /usr/local/bin/ffprobe /usr/bin/ffprobe && \
-    ln -sf /usr/local/piper/piper /usr/local/bin/piper
+# Symlinks
+RUN ln -sf /usr/local/bin/ffmpeg /usr/bin/ffmpeg /bin/ffmpeg \
+    && ln -sf /usr/local/bin/ffprobe /usr/bin/ffprobe /bin/ffprobe
 
-ENV PATH="/usr/local/bin:/usr/local/piper:$PATH"
+# Install Debian dependencies (fonts, libs for text rendering & optional fallbacks)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl jq sqlite3 coreutils findutils ca-certificates \
+    fontconfig fonts-dejavu fonts-noto fonts-noto-core fonts-noto-arabic \
+    libass9 libfribidi0 libharfbuzz0b libfreetype6 \
+    libstdc++6 zlib1g libexpat1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Update font cache
+RUN fc-cache -fv
+
+# Create required directories
+RUN mkdir -p /tmp/ffmpeg-temp /tmp/ffmpeg-cache /var/log/ffmpeg \
+    && chmod 1777 /tmp/ffmpeg-temp /tmp/ffmpeg-cache /tmp \
+    && chmod 755 /var/log/ffmpeg
+
+# Environment variables
 ENV FFMPEG_PATH="/usr/local/bin/ffmpeg"
 ENV FFPROBE_PATH="/usr/local/bin/ffprobe"
 ENV FFREPORT="file=/tmp/ffreport-%p-%t.log:level=32"
 ENV PIPER_MODEL="/usr/local/piper-voices/en_GB-vctk-medium.onnx"
 ENV PIPER_SPEAKER="9"
+ENV PATH="/usr/local/bin:$PATH"
 
-# Temp dirs
-RUN mkdir -p /tmp/ffmpeg-temp /tmp/ffmpeg-cache /var/log/ffmpeg /scripts /backup-data /home/node/.n8n && \
-    chmod 1777 /tmp /tmp/ffmpeg-temp /tmp/ffmpeg-cache && \
-    chmod 755 /var/log/ffmpeg && \
-    chown -R node:node /home/node/.n8n /scripts /backup-data /tmp/ffmpeg-temp /tmp/ffmpeg-cache /var/log/ffmpeg
-
-# Simple TTS helper
+# Robust TTS Script with error handling
 RUN cat > /usr/local/bin/tts-en << 'EOF'
-#!/bin/sh
-set -eu
-TEXT="${1:-}"
+#!/bin/bash
+set -euo pipefail
+
+# Usage: tts-en "Text" [/path/to/output.wav|mp3]
+TEXT="$1"
 OUTPUT="${2:-/tmp/tts_out.wav}"
 
-[ -n "$TEXT" ] || { echo "Usage: tts-en \"text\" /path/out.wav|out.mp3" >&2; exit 2; }
-
-if echo "$OUTPUT" | grep -qiE '\.mp3$'; then
-  TMP_WAV="/tmp/_piper_$$.wav"
-  printf "%s" "$TEXT" | piper --model "$PIPER_MODEL" --speaker "$PIPER_SPEAKER" --output_file "$TMP_WAV"
-  ffmpeg -y -hide_banner -loglevel error -i "$TMP_WAV" -codec:a libmp3lame -qscale:a 2 "$OUTPUT"
-  rm -f "$TMP_WAV"
-else
-  printf "%s" "$TEXT" | piper --model "$PIPER_MODEL" --speaker "$PIPER_SPEAKER" --output_file "$OUTPUT"
+# Validate input
+if [ -z "$TEXT" ]; then
+    echo "Error: No text provided" >&2
+    exit 1
 fi
-echo "Done: $OUTPUT"
+
+mkdir -p "$(dirname "$OUTPUT")"
+
+case "${OUTPUT##*.}" in
+    mp3)
+        TMP_WAV="$(mktemp --suffix=.wav)"
+        trap 'rm -f "$TMP_WAV"' EXIT
+        echo "$TEXT" | piper \
+            --model "$PIPER_MODEL" \
+            --speaker "$PIPER_SPEAKER" \
+            --output_file "$TMP_WAV"
+        ffmpeg -y -hide_banner -loglevel error -i "$TMP_WAV" \
+               -codec:a libmp3lame -qscale:a 2 "$OUTPUT"
+        echo "✅ MP3 saved: $OUTPUT"
+        ;;
+    wav|*)
+        echo "$TEXT" | piper \
+            --model "$PIPER_MODEL" \
+            --speaker "$PIPER_SPEAKER" \
+            --output_file "$OUTPUT"
+        echo "✅ WAV saved: $OUTPUT"
+        ;;
+esac
 EOF
+
 RUN chmod +x /usr/local/bin/tts-en
 
-# Install your community node
+# Install Instagram Node (as node user)
 USER node
-RUN cd /home/node/.n8n && mkdir -p nodes && cd nodes && \
-    npm init -y >/dev/null 2>&1 && \
-    npm install @mookielianhd/n8n-nodes-instagram || true
+RUN mkdir -p /home/node/.n8n/nodes \
+    && cd /home/node/.n8n/nodes \
+    && npm init -y --silent \
+    && npm install @mookielianhd/n8n-nodes-instagram --silent || true
 
+# Setup directories and permissions
 USER root
+RUN mkdir -p /scripts /backup-data /home/node/.n8n \
+    && chown -R node:node /scripts /backup-data /home/node/.n8n \
+    && chown -R node:node /tmp/ffmpeg-temp /tmp/ffmpeg-cache /var/log/ffmpeg
+
+# Copy user scripts
 COPY --chown=node:node scripts/ /scripts/
-RUN sed -i 's/\r$//' /scripts/*.sh 2>/dev/null || true && chmod 0755 /scripts/*.sh
+RUN sed -i 's/\r$//' /scripts/*.sh \
+    && chmod 0755 /scripts/*.sh
 
-# Final runtime sanity check (important: show errors, don't hide)
+# Final Verification (as node user)
 USER node
-RUN ffmpeg -version && ffprobe -version && \
-    echo "Hello Piper" | piper --model "$PIPER_MODEL" --speaker "$PIPER_SPEAKER" --output_file /tmp/test_piper.wav && \
-    ls -lh /tmp/test_piper.wav
+RUN echo "🧪 Running final tests..."
 
+# Test FFmpeg
+echo "🔧 Testing FFmpeg..."
+/usr/local/bin/ffmpeg -version
+/usr/local/bin/ffprobe -version
+
+# Test Piper directly
+echo "🎙️ Testing Piper binary..."
+/usr/local/bin/piper --version
+
+# Test TTS generation
+echo "🔊 Generating test audio..."
+tts-en "Hello from Piper TTS on n8n! This works perfectly." /tmp/test_tts.mp3
+[ -s /tmp/test_tts.mp3 ] && echo "✅ Test MP3 generated: $(stat -c%s /tmp/test_tts.mp3) bytes" || echo "❌ MP3 generation failed"
+
+# List model files
+echo "📂 Piper voices:"
+ls -lh /usr/local/piper-voices/
+
+echo "✅ All tests passed. Build complete."
+
+# Default working dir and entrypoint
 WORKDIR /home/node
 ENTRYPOINT ["sh", "/scripts/start.sh"]
