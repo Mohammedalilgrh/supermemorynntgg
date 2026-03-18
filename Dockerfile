@@ -11,27 +11,41 @@ RUN apk add --no-cache \
 # Directory to collect tools
 RUN mkdir -p /toolbox /tmp/piper-bin /tmp/piper-voices
 
-# === Download STATIC FFmpeg (Alpine-compatible static build) ===
-RUN curl -L -o /tmp/ffmpeg.tar.xz \
-    https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-20240715-1212/ffmpeg-master-latest-alpine-amd64-static.tar.xz \
-    && tar -xJf /tmp/ffmpeg.tar.xz -C /tmp --strip-components=1 \
-    && cp /tmp/ffmpeg /tmp/ffprobe /toolbox/ \
-    && rm -rf /tmp/ffmpeg*
+# === Download STATIC FFmpeg (Alpine-compatible, from static-ffmpeg.gitlab.io) ===
+# Latest stable static FFmpeg for Alpine x86_64
+ENV FFMPEG_URL="https://static-ffmpeg.gitlab.io/stable/linux/static_x86_64_alpine/ffmpeg-static-x86_64-alpine.tar.xz"
+ENV FFMPEG_ARCHIVE="ffmpeg-static-x86_64-alpine.tar.xz"
+
+RUN curl -fSL "$FFMPEG_URL" -o "/tmp/$FFMPEG_ARCHIVE" \
+    && echo "✅ FFmpeg downloaded: $(stat -c%s "/tmp/$FFMPEG_ARCHIVE") bytes" \
+    && mkdir -p /tmp/ffmpeg-extracted \
+    && tar -xJf "/tmp/$FFMPEG_ARCHIVE" -C "/tmp/ffmpeg-extracted" --strip-components=1 \
+    && cp "/tmp/ffmpeg-extracted/ffmpeg" "/tmp/ffmpeg-extracted/ffprobe" /toolbox/ \
+    && rm -rf "/tmp/ffmpeg-extracted" "/tmp/$FFMPEG_ARCHIVE" \
+    || (echo "❌ Failed to download or extract FFmpeg from $FFMPEG_URL" && exit 1)
 
 # === Download Piper (statically linked Linux binary) ===
-RUN curl -L -o /tmp/piper.tar.gz \
-    https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_linux_x86_64.tar.gz \
-    && mkdir -p /tmp/piper-bin \
-    && tar -xzf /tmp/piper.tar.gz -C /tmp/piper-bin --strip-components=1 \
+ENV PIPER_URL="https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_linux_x86_64.tar.gz"
+ENV PIPER_ARCHIVE="piper_linux_x86_64.tar.gz"
+
+RUN mkdir -p /tmp/piper-bin \
+    && curl -fSL "$PIPER_URL" -o "/tmp/$PIPER_ARCHIVE" \
+    && echo "✅ Piper downloaded: $(stat -c%s "/tmp/$PIPER_ARCHIVE") bytes" \
+    && tar -xzf "/tmp/$PIPER_ARCHIVE" -C /tmp/piper-bin --strip-components=1 \
     && cp /tmp/piper-bin/piper /toolbox/ \
-    && rm -rf /tmp/piper*
+    && rm -rf /tmp/piper* \
+    || (echo "❌ Failed to download Piper from $PIPER_URL" && exit 1)
 
 # === Download Piper Voice Model (en_GB-vctk-medium) ===
+ENV MODEL_URL_ONNX="https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_GB/vctk/medium/en_GB-vctk-medium.onnx"
+ENV MODEL_URL_JSON="https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_GB/vctk/medium/en_GB-vctk-medium.onnx.json"
+
 RUN mkdir -p /tmp/piper-voices \
-    && curl -L -o /tmp/piper-voices/en_GB-vctk-medium.onnx \
-       https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_GB/vctk/medium/en_GB-vctk-medium.onnx \
-    && curl -L -o /tmp/piper-voices/en_GB-vctk-medium.onnx.json \
-       https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_GB/vctk/medium/en_GB-vctk-medium.onnx.json
+    && curl -fSL "$MODEL_URL_ONNX" -o "/tmp/piper-voices/en_GB-vctk-medium.onnx" \
+    && echo "✅ Model ONNX downloaded" \
+    && curl -fSL "$MODEL_URL_JSON" -o "/tmp/piper-voices/en_GB-vctk-medium.onnx.json" \
+    && echo "✅ Model JSON downloaded" \
+    || (echo "❌ Failed to download Piper model files" && exit 1)
 
 # ==================================================
 # STAGE 2: n8n (Debian) — Final runtime
@@ -152,4 +166,4 @@ RUN echo "🧪 Running final tests..." && \
 
 # Default working dir and entrypoint
 WORKDIR /home/node
-ENTRYPOINT ["sh", "/scripts/start.sh"]
+ENTRYPOINT ["sh", "/scripts/
