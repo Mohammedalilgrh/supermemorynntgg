@@ -3,37 +3,31 @@
 # ==================================================
 FROM alpine:3.20 AS tools
 
-# Install tools + file (for binary verification)
 RUN apk add --no-cache curl tar gzip xz findutils ca-certificates file
 
 RUN mkdir -p /toolbox /tmp/piper-bin /tmp/piper-voices
 
 # === Download STATIC FFmpeg (Alpine/musl) ===
-# PRIMARY: BtbN's musl build (update URL if needed)
-# Fallback: Alpine's static ffmpeg package
-RUN echo "🎯 Attempting to download static FFmpeg..." && \
-    FFMPEG_URL="https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2024-11-10-12-56/ffmpeg-n7.1-latest-linux64-musl-7.1.tar.xz" && \
-    curl -fSL --connect-timeout 30 --retry 2 "$FFMPEG_URL" -o /tmp/ffmpeg.tar.xz && \
-    echo "✅ Downloaded: $(stat -c%s /tmp/ffmpeg.tar.xz) bytes" && \
+RUN echo "🎯 Downloading static FFmpeg..." && \
+    curl -fSL --connect-timeout 30 --retry 2 \
+        "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2024-11-10-12-56/ffmpeg-n7.1-latest-linux64-musl-7.1.tar.xz" \
+        -o /tmp/ffmpeg.tar.xz && \
+    echo "✅ FFmpeg: $(stat -c%s /tmp/ffmpeg.tar.xz) bytes" && \
     tar -xJf /tmp/ffmpeg.tar.xz -C /tmp --strip-components=1 && \
     cp /tmp/ffmpeg /tmp/ffprobe /toolbox/ && \
     rm -rf /tmp/ffmpeg* && \
-    echo "✅ FFmpeg static binaries ready" || \
-    (echo "⚠️ Download failed. Installing Alpine ffmpeg package as fallback..." && \
-     apk add --no-cache ffmpeg && \
-     cp $(which ffmpeg) $(which ffprobe) /toolbox/ && \
-     echo "✅ FFmpeg from Alpine repo ready")
+    echo "✅ FFmpeg ready"
 
 # === Download Piper (static binary) ===
 RUN echo "🎯 Downloading Piper..." && \
     curl -fSL --connect-timeout 30 --retry 2 \
         "https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_linux_x86_64.tar.gz" \
         -o /tmp/piper.tar.gz && \
-    echo "✅ Downloaded: $(stat -c%s /tmp/piper.tar.gz) bytes" && \
+    echo "✅ Piper: $(stat -c%s /tmp/piper.tar.gz) bytes" && \
     tar -xzf /tmp/piper.tar.gz -C /tmp/piper-bin --strip-components=1 && \
     cp /tmp/piper-bin/piper /toolbox/ && \
     rm -rf /tmp/piper* && \
-    echo "✅ Piper binary ready"
+    echo "✅ Piper ready"
 
 # === Download Piper Voice Model ===
 RUN echo "🎯 Downloading Piper model..." && \
@@ -44,12 +38,12 @@ RUN echo "🎯 Downloading Piper model..." && \
     curl -fSL --connect-timeout 30 --retry 2 \
         "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_GB/vctk/medium/en_GB-vctk-medium.onnx.json" \
         -o /tmp/piper-voices/en_GB-vctk-medium.onnx.json && \
-    echo "✅ Piper model files ready"
+    echo "✅ Model ready"
 
 # ==================================================
 # STAGE 2: n8n (Debian) — Final runtime
 # ==================================================
-FROM docker.n8n.io/n8nio/n8n:2.6.2
+FROM docker.n8n.io/n8nio/n8n:2.6.2-debian
 
 USER root
 
@@ -82,13 +76,12 @@ RUN mkdir -p /tmp/ffmpeg-temp /tmp/ffmpeg-cache /var/log/ffmpeg \
     && chmod 1777 /tmp/ffmpeg-temp /tmp/ffmpeg-cache /tmp \
     && chmod 755 /var/log/ffmpeg
 
-# Environment variables
+# Environment variables (DO NOT override PATH)
 ENV FFMPEG_PATH="/usr/local/bin/ffmpeg"
 ENV FFPROBE_PATH="/usr/local/bin/ffprobe"
 ENV FFREPORT="file=/tmp/ffreport-%p-%t.log:level=32"
 ENV PIPER_MODEL="/usr/local/piper-voices/en_GB-vctk-medium.onnx"
 ENV PIPER_SPEAKER="9"
-ENV PATH="/usr/local/bin:$PATH"
 
 # Robust TTS Script
 RUN cat > /usr/local/bin/tts-en << 'EOF'
@@ -96,7 +89,7 @@ RUN cat > /usr/local/bin/tts-en << 'EOF'
 set -euo pipefail
 TEXT="$1"
 OUTPUT="${2:-/tmp/tts_out.wav}"
-if [ -z "$TEXT" ]; then echo "Error: No text" >&2; exit 1; fi
+[ -z "$TEXT" ] && { echo "Error: No text" >&2; exit 1; }
 mkdir -p "$(dirname "$OUTPUT")"
 case "${OUTPUT##*.}" in
     mp3)
@@ -104,10 +97,10 @@ case "${OUTPUT##*.}" in
         trap 'rm -f "$TMP_WAV"' EXIT
         echo "$TEXT" | piper --model "$PIPER_MODEL" --speaker "$PIPER_SPEAKER" --output_file "$TMP_WAV"
         ffmpeg -y -hide_banner -loglevel error -i "$TMP_WAV" -codec:a libmp3lame -qscale:a 2 "$OUTPUT"
-        echo "✅ MP3 saved: $OUTPUT"
+        echo "✅ MP3: $OUTPUT"
         ;;
     *) echo "$TEXT" | piper --model "$PIPER_MODEL" --speaker "$PIPER_SPEAKER" --output_file "$OUTPUT"
-        echo "✅ WAV saved: $OUTPUT" ;;
+        echo "✅ WAV: $OUTPUT" ;;
 esac
 EOF
 RUN chmod +x /usr/local/bin/tts-en
@@ -127,7 +120,7 @@ RUN mkdir -p /scripts /backup-data /home/node/.n8n \
 COPY --chown=node:node scripts/ /scripts/
 RUN sed -i 's/\r$//' /scripts/*.sh && chmod 0755 /scripts/*.sh
 
-# Final Verification (as node user)
+# Final Verification
 USER node
 RUN echo "🧪 Testing FFmpeg..." && \
     /usr/local/bin/ffmpeg -version && \
@@ -135,7 +128,7 @@ RUN echo "🧪 Testing FFmpeg..." && \
     /usr/local/bin/piper --version && \
     echo "🧪 Testing TTS..." && \
     tts-en "Hello from Piper TTS on n8n! This works perfectly." /tmp/test_tts.mp3 && \
-    [ -s /tmp/test_tts.mp3 ] && echo "✅ SUCCESS: $(stat -c%s /tmp/test_tts.mp3) bytes generated" || \
+    [ -s /tmp/test_tts.mp3 ] && echo "✅ SUCCESS: $(stat -c%s /tmp/test_tts.mp3) bytes" || \
     (echo "❌ FAILED: Zero KB file" && exit 1)
 
 WORKDIR /home/node
