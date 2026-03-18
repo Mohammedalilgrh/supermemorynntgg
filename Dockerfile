@@ -61,7 +61,7 @@ RUN echo "⬇️ Downloading voice model..." && \
 # ==================================================
 # STAGE 2: n8n final image
 # ==================================================
-FROM docker.n8n.io/n8nio/n8n:2.6.2-debian
+FROM docker.n8n.io/n8nio/n8n:2.6.2
 
 USER root
 
