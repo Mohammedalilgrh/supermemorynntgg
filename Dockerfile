@@ -1,21 +1,35 @@
 # ==================================================
-# STAGE 1: tools (Alpine) — Collect STATIC binaries
+# STAGE 1: tools (Alpine) — Collect STATIC binaries and libraries
 # ==================================================
 FROM alpine:3.20 AS tools
 
-RUN apk add --no-cache curl tar gzip xz findutils ca-certificates file
+RUN apk add --no-cache \
+      curl jq sqlite tar gzip xz \
+      coreutils findutils ca-certificates file && \
+    mkdir -p /toolbox/bin /toolbox/lib /toolbox/piper-voices
 
-RUN mkdir -p /toolbox /tmp/piper-bin /tmp/piper-voices
+# Copy common utilities to toolbox
+RUN for cmd in curl jq sqlite3 split sha256sum \
+               stat du sort tail awk xargs find \
+               wc cut tr gzip tar cat date sleep \
+               mkdir rm ls grep sed head touch \
+               cp mv basename expr; do \
+      p="$(which $cmd 2>/dev/null)" && \
+        [ -f "$p" ] && cp "$p" /toolbox/bin/ || true; \
+    done
 
-# === Download STATIC FFmpeg (Alpine/musl) ===
+# Copy required libraries
+RUN cp -r /lib/* /toolbox/lib/ 2>/dev/null || true && \
+    cp -r /usr/lib/* /toolbox/lib/ 2>/dev/null || true && \
+    cp -r /etc/ssl/certs /toolbox/
+
+# === Download STATIC FFmpeg (static build) ===
 RUN echo "🎯 Downloading static FFmpeg..." && \
-    curl -fSL --connect-timeout 30 --retry 2 \
-        "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2024-11-10-12-56/ffmpeg-n7.1-latest-linux64-musl-7.1.tar.xz" \
-        -o /tmp/ffmpeg.tar.xz && \
-    echo "✅ FFmpeg: $(stat -c%s /tmp/ffmpeg.tar.xz) bytes" && \
-    tar -xJf /tmp/ffmpeg.tar.xz -C /tmp --strip-components=1 && \
-    cp /tmp/ffmpeg /tmp/ffprobe /toolbox/ && \
-    rm -rf /tmp/ffmpeg* && \
+    curl -L -o /tmp/ffmpeg.tar.xz "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz" && \
+    tar -xJf /tmp/ffmpeg.tar.xz -C /tmp/ && \
+    cp /tmp/ffmpeg-*-static/ffmpeg /toolbox/bin/ && \
+    cp /tmp/ffmpeg-*-static/ffprobe /toolbox/bin/ && \
+    rm -rf /tmp/ffmpeg-*-static /tmp/ffmpeg.tar.xz && \
     echo "✅ FFmpeg ready"
 
 # === Download Piper (static binary) ===
@@ -23,21 +37,20 @@ RUN echo "🎯 Downloading Piper..." && \
     curl -fSL --connect-timeout 30 --retry 2 \
         "https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_linux_x86_64.tar.gz" \
         -o /tmp/piper.tar.gz && \
-    echo "✅ Piper: $(stat -c%s /tmp/piper.tar.gz) bytes" && \
-    tar -xzf /tmp/piper.tar.gz -C /tmp/piper-bin --strip-components=1 && \
-    cp /tmp/piper-bin/piper /toolbox/ && \
+    tar -xzf /tmp/piper.tar.gz -C /tmp/ && \
+    cp /tmp/piper/piper /toolbox/bin/ && \
     rm -rf /tmp/piper* && \
     echo "✅ Piper ready"
 
 # === Download Piper Voice Model ===
 RUN echo "🎯 Downloading Piper model..." && \
-    mkdir -p /tmp/piper-voices && \
+    mkdir -p /toolbox/piper-voices && \
     curl -fSL --connect-timeout 30 --retry 2 \
         "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_GB/vctk/medium/en_GB-vctk-medium.onnx" \
-        -o /tmp/piper-voices/en_GB-vctk-medium.onnx && \
+        -o /toolbox/piper-voices/en_GB-vctk-medium.onnx && \
     curl -fSL --connect-timeout 30 --retry 2 \
         "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_GB/vctk/medium/en_GB-vctk-medium.onnx.json" \
-        -o /tmp/piper-voices/en_GB-vctk-medium.onnx.json && \
+        -o /toolbox/piper-voices/en_GB-vctk-medium.onnx.json && \
     echo "✅ Model ready"
 
 # ==================================================
@@ -47,41 +60,55 @@ FROM docker.n8n.io/n8nio/n8n:2.6.2
 
 USER root
 
-# Copy binaries from tools stage
-COPY --from=tools /toolbox/ffmpeg /usr/local/bin/ffmpeg
-COPY --from=tools /toolbox/ffprobe /usr/local/bin/ffprobe
-COPY --from=tools /toolbox/piper /usr/local/bin/piper
-COPY --from=tools /tmp/piper-voices/ /usr/local/piper-voices/
+# Copy binaries, libraries, and models from tools stage
+COPY --from=tools /toolbox/bin/          /usr/local/bin/
+COPY --from=tools /toolbox/lib/          /usr/local/lib/
+COPY --from=tools /toolbox/piper-voices/ /usr/local/piper-voices/
+COPY --from=tools /toolbox/certs/        /etc/ssl/certs/
+
+# Set library path
+ENV LD_LIBRARY_PATH="/usr/local/lib:/usr/lib:/lib:$LD_LIBRARY_PATH"
+ENV PATH="/usr/local/bin:$PATH"
 
 # Make binaries executable
 RUN chmod +x /usr/local/bin/ffmpeg /usr/local/bin/ffprobe /usr/local/bin/piper
 
-# Symlinks
-RUN ln -sf /usr/local/bin/ffmpeg /usr/bin/ffmpeg /bin/ffmpeg \
-    && ln -sf /usr/local/bin/ffprobe /usr/bin/ffprobe /bin/ffprobe
-
-# Install Debian dependencies
+# Install Debian dependencies (including fonts)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl jq sqlite3 coreutils findutils ca-certificates \
     fontconfig fonts-dejavu fonts-noto fonts-noto-core fonts-noto-arabic \
     libass9 libfribidi0 libharfbuzz0b libfreetype6 \
-    libstdc++6 zlib1g libexpat1 \
+    libstdc++6 libgomp1 zlib1g libexpat1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Update font cache
 RUN fc-cache -fv
 
-# Create required directories
-RUN mkdir -p /tmp/ffmpeg-temp /tmp/ffmpeg-cache /var/log/ffmpeg \
-    && chmod 1777 /tmp/ffmpeg-temp /tmp/ffmpeg-cache /tmp \
-    && chmod 755 /var/log/ffmpeg
-
-# Environment variables (DO NOT override PATH)
+# FFmpeg environment variables
 ENV FFMPEG_PATH="/usr/local/bin/ffmpeg"
 ENV FFPROBE_PATH="/usr/local/bin/ffprobe"
 ENV FFREPORT="file=/tmp/ffreport-%p-%t.log:level=32"
 ENV PIPER_MODEL="/usr/local/piper-voices/en_GB-vctk-medium.onnx"
 ENV PIPER_SPEAKER="9"
+
+# Create required directories with proper permissions
+RUN mkdir -p /tmp/ffmpeg-temp /tmp/ffmpeg-cache /var/log/ffmpeg \
+    /scripts /backup-data /home/node/.n8n && \
+    chmod 1777 /tmp/ffmpeg-temp /tmp/ffmpeg-cache /tmp && \
+    chmod 755 /var/log/ffmpeg && \
+    chown -R node:node /home/node/.n8n /scripts /backup-data \
+    /tmp/ffmpeg-temp /tmp/ffmpeg-cache /var/log/ffmpeg
+
+# Create symlinks for common paths
+RUN ln -sf /usr/local/bin/ffmpeg /usr/bin/ffmpeg && \
+    ln -sf /usr/local/bin/ffprobe /usr/bin/ffprobe && \
+    ln -sf /usr/local/bin/ffmpeg /bin/ffmpeg && \
+    ln -sf /usr/local/bin/ffprobe /bin/ffprobe
+
+# Verify binaries work
+RUN /usr/local/bin/ffmpeg -version && \
+    /usr/local/bin/ffprobe -version && \
+    /usr/local/bin/piper --version
 
 # Robust TTS Script
 RUN cat > /usr/local/bin/tts-en << 'EOF'
@@ -105,27 +132,24 @@ esac
 EOF
 RUN chmod +x /usr/local/bin/tts-en
 
-# Install Instagram Node
+# Install Instagram Node (as node user)
 USER node
-RUN mkdir -p /home/node/.n8n/nodes \
-    && cd /home/node/.n8n/nodes \
-    && npm init -y --silent \
-    && npm install @mookielianhd/n8n-nodes-instagram --silent || true
+RUN mkdir -p /home/node/.n8n/nodes && \
+    cd /home/node/.n8n/nodes && \
+    npm init -y --silent && \
+    npm install @mookielianhd/n8n-nodes-instagram --silent || true
 
-# Setup scripts
+# Copy startup scripts
 USER root
-RUN mkdir -p /scripts /backup-data /home/node/.n8n \
-    && chown -R node:node /scripts /backup-data /home/node/.n8n \
-    && chown -R node:node /tmp/ffmpeg-temp /tmp/ffmpeg-cache /var/log/ffmpeg
 COPY --chown=node:node scripts/ /scripts/
 RUN sed -i 's/\r$//' /scripts/*.sh && chmod 0755 /scripts/*.sh
 
-# Final Verification
+# Final verification as node user
 USER node
 RUN echo "🧪 Testing FFmpeg..." && \
-    /usr/local/bin/ffmpeg -version && \
+    ffmpeg -version > /dev/null && \
     echo "🧪 Testing Piper..." && \
-    /usr/local/bin/piper --version && \
+    piper --version > /dev/null && \
     echo "🧪 Testing TTS..." && \
     tts-en "Hello from Piper TTS on n8n! This works perfectly." /tmp/test_tts.mp3 && \
     [ -s /tmp/test_tts.mp3 ] && echo "✅ SUCCESS: $(stat -c%s /tmp/test_tts.mp3) bytes" || \
