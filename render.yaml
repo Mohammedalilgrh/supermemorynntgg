@@ -62,3 +62,19 @@ services:
         value: "false"
       - key: EXECUTIONS_PROCESS
         value: "main"
+
+      # ========== Cloudflare R2 Configuration ==========
+      - key: R2_ACCOUNT_ID
+        value: "b97f9ba5a3446028430de112d2bd0a61"
+      - key: R2_ACCESS_KEY_ID
+        sync: false
+      - key: R2_SECRET_ACCESS_KEY
+        sync: false
+      - key: R2_BUCKET_NAME
+        value: "renderram"
+      - key: MAX_VIDEOS_PER_BATCH
+        value: "3"
+      - key: AUTO_CLEANUP
+        value: "true"
+      - key: TEMP_CLEANUP_HOURS
+        value: "24"
