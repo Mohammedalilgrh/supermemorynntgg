@@ -1,7 +1,8 @@
 #!/bin/bash
 
-# Viral Video Processor for n8n
+# Viral Video Processor for n8n with Cloudflare R2
 # This script processes videos into 9:16 format with viral effects
+# Stores all files in Cloudflare R2 bucket
 
 set -e
 
@@ -9,6 +10,44 @@ set -e
 VIDEO_URL="$1"
 VIDEO_ID="$2"
 OUTPUT_DIR="${3:-/tmp/viral_output}"
+
+# ========== Cloudflare R2 Configuration ==========
+R2_ACCOUNT_ID="${R2_ACCOUNT_ID:-b97f9ba5a3446028430de112d2bd0a61}"
+R2_ACCESS_KEY_ID="${R2_ACCESS_KEY_ID:-}"
+R2_SECRET_ACCESS_KEY="${R2_SECRET_ACCESS_KEY:-}"
+R2_BUCKET_NAME="${R2_BUCKET_NAME:-renderram}"
+R2_ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+
+# Function to upload file to R2
+upload_to_r2() {
+    local local_file="$1"
+    local remote_key="$2"
+    local content_type="${3:-video/mp4}"
+    
+    if [ -z "$R2_ACCESS_KEY_ID" ] || [ -z "$R2_SECRET_ACCESS_KEY" ]; then
+        echo "⚠️ R2 credentials not set, skipping upload" >> "$LOG_FILE"
+        return 1
+    fi
+    
+    echo "   Uploading to R2: $remote_key" >> "$LOG_FILE"
+    
+    curl -s -X PUT \
+        -H "Authorization: AWS ${R2_ACCESS_KEY_ID}:$(echo -n "PUT\n\n${content_type}\n\nx-amz-date:$(date -u +%Y%m%dT%H%M%SZ)\n/${R2_BUCKET_NAME}/${remote_key}" | openssl sha1 -hmac "${R2_SECRET_ACCESS_KEY}" -binary | base64)" \
+        -H "x-amz-date: $(date -u +%Y%m%dT%H%M%SZ)" \
+        -H "Content-Type: ${content_type}" \
+        -T "$local_file" \
+        "${R2_ENDPOINT}/${R2_BUCKET_NAME}/${remote_key}" 2>> "$LOG_FILE"
+    
+    return $?
+}
+
+# Function to generate R2 public URL
+get_r2_url() {
+    local remote_key="$1"
+    echo "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com/${R2_BUCKET_NAME}/${remote_key}"
+}
+
+# ========== End R2 Configuration ==========
 
 # Validate input
 if [ -z "$VIDEO_URL" ] || [ "$VIDEO_URL" = "null" ] || [ "$VIDEO_URL" = "undefined" ]; then
@@ -34,6 +73,8 @@ LOG_FILE="/tmp/ffmpeg-temp/ffmpeg_${VIDEO_ID}.log"
 
 echo "Processing video ID: $VIDEO_ID" > "$LOG_FILE"
 echo "URL: $VIDEO_URL" >> "$LOG_FILE"
+echo "R2 Bucket: $R2_BUCKET_NAME" >> "$LOG_FILE"
+echo "R2 Endpoint: $R2_ENDPOINT" >> "$LOG_FILE"
 
 # Download video
 echo "Downloading video..." >> "$LOG_FILE"
@@ -118,8 +159,38 @@ if [ -f "$OUTPUT_FILE" ] && [ -s "$OUTPUT_FILE" ]; then
     
     echo "✅ Video processed successfully: ${FILE_SIZE_MB}MB" >> "$LOG_FILE"
     
-    # Output JSON for n8n
-    cat << EOF
+    # ========== Upload to Cloudflare R2 ==========
+    R2_KEY="processed/${VIDEO_ID}_$(date +%s).mp4"
+    echo "Uploading to R2: $R2_KEY" >> "$LOG_FILE"
+    
+    if upload_to_r2 "$OUTPUT_FILE" "$R2_KEY" "video/mp4"; then
+        R2_URL=$(get_r2_url "$R2_KEY")
+        echo "✅ Uploaded to R2: $R2_URL" >> "$LOG_FILE"
+        
+        # Also upload input to temp/ for backup (optional)
+        TEMP_R2_KEY="temp/${VIDEO_ID}_$(date +%s).mp4"
+        upload_to_r2 "$INPUT_FILE" "$TEMP_R2_KEY" "video/mp4" 2>/dev/null || true
+        
+        # Output JSON for n8n with R2 URL
+        cat << EOF
+{
+    "video_id": "$VIDEO_ID",
+    "output_file": "$OUTPUT_FILE",
+    "r2_url": "$R2_URL",
+    "r2_key": "$R2_KEY",
+    "size_bytes": $FILE_SIZE,
+    "size_mb": $FILE_SIZE_MB,
+    "duration": $DURATION,
+    "format": "9:16",
+    "resolution": "1080x1920",
+    "storage": "Cloudflare R2",
+    "bucket": "$R2_BUCKET_NAME",
+    "status": "success"
+}
+EOF
+    else
+        # Fallback: return local file if R2 upload fails
+        cat << EOF
 {
     "video_id": "$VIDEO_ID",
     "output_file": "$OUTPUT_FILE",
@@ -128,9 +199,14 @@ if [ -f "$OUTPUT_FILE" ] && [ -s "$OUTPUT_FILE" ]; then
     "duration": $DURATION,
     "format": "9:16",
     "resolution": "1080x1920",
-    "status": "success"
+    "storage": "local",
+    "status": "success",
+    "warning": "R2 upload failed, file saved locally"
 }
 EOF
+    fi
+    # ========== End R2 Upload ==========
+    
 else
     echo "❌ FFmpeg processing failed" >> "$LOG_FILE"
     cat << EOF
@@ -146,5 +222,6 @@ fi
 
 # Cleanup temp files
 rm -rf "$TEMP_DIR"
+rm -f "$OUTPUT_FILE" 2>/dev/null || true
 
 echo "✅ Cleanup completed" >> "$LOG_FILE"
