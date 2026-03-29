@@ -1,94 +1,146 @@
-# ───────────────────────────────────────────────────────
-# Stage 1: Download static FFmpeg (full feature set)
-# ───────────────────────────────────────────────────────
-FROM alpine:3.20 AS ffmpeg-tools
+FROM alpine:3.20 AS tools
 
-# install only what we need in this stage
 RUN apk add --no-cache \
-      curl \
-      xz \
-      tar \
-      findutils
+      curl jq sqlite tar gzip xz \
+      coreutils findutils ca-certificates \
+      fontconfig ttf-dejavu font-noto font-noto-arabic \
+      font-noto-extra font-arabic-misc fonts-liberation \
+      libass fribidi harfbuzz freetype libstdc++ \
+      libgcc libgomp zlib expat && \
+    mkdir -p /toolbox && \
+    for cmd in curl jq sqlite3 split sha256sum \
+               stat du sort tail awk xargs find \
+               wc cut tr gzip tar cat date sleep \
+               mkdir rm ls grep sed head touch \
+               cp mv basename expr fc-cache fc-list; do \
+      p="$(which $cmd 2>/dev/null)" && \
+        [ -f "$p" ] && cp "$p" /toolbox/ || true; \
+    done
 
-# fetch & extract, then pluck the two binaries via `find`
-RUN mkdir -p /toolbox /tmp/ffmpeg && \
-    curl -fsSL https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz \
-      -o /tmp/ffmpeg/ffmpeg.tar.xz && \
-    tar -xJf /tmp/ffmpeg/ffmpeg.tar.xz -C /tmp/ffmpeg && \
-    # locate the versioned directory (e.g. "ffmpeg-7.0.2-amd64-static")
-    d="$(find /tmp/ffmpeg -maxdepth 1 -type d -name '*-static' | head -n1)" && \
-    cp "$d/ffmpeg"  /toolbox/ffmpeg && \
-    cp "$d/ffprobe" /toolbox/ffprobe && \
-    chmod +x /toolbox/ffmpeg /toolbox/ffprobe
+# Copy font libraries and configs
+RUN mkdir -p /toolbox/fonts /toolbox/fontconfig && \
+    cp -r /usr/share/fonts/* /toolbox/fonts/ 2>/dev/null || true && \
+    cp -r /etc/fonts/* /toolbox/fontconfig/ 2>/dev/null || true && \
+    fc-cache -fv
 
-# ───────────────────────────────────────────────────────
-# Stage 2: Build final n8n image with FFmpeg + Arabic fonts
-# ───────────────────────────────────────────────────────
+# Download FFmpeg static with all codecs
+RUN curl -L -o /tmp/ffmpeg.tar.xz https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz && \
+    tar -xJf /tmp/ffmpeg.tar.xz -C /tmp/ && \
+    cp /tmp/ffmpeg-*-static/ffmpeg /toolbox/ && \
+    cp /tmp/ffmpeg-*-static/ffprobe /toolbox/ && \
+    cp /tmp/ffmpeg-*-static/qt-faststart /toolbox/ 2>/dev/null || true && \
+    rm -rf /tmp/ffmpeg-*-static /tmp/ffmpeg.tar.xz
+
 FROM docker.n8n.io/n8nio/n8n:2.6.2
 
 USER root
 
-# 1) Copy in our statically-built FFmpeg & FFprobe
-COPY --from=ffmpeg-tools /toolbox/ffmpeg   /usr/local/bin/ffmpeg
-COPY --from=ffmpeg-tools /toolbox/ffprobe  /usr/local/bin/ffprobe
+# Install minimal runtime dependencies
+RUN apk add --no-cache \
+    fontconfig \
+    ttf-dejavu \
+    font-noto \
+    font-noto-arabic \
+    font-noto-extra \
+    font-arabic-misc \
+    fonts-liberation \
+    libass \
+    fribidi \
+    harfbuzz \
+    freetype \
+    libstdc++ \
+    libgcc \
+    libgomp \
+    zlib \
+    expat \
+    gcompat
 
-RUN chmod +x /usr/local/bin/ffmpeg /usr/local/bin/ffprobe && \
-    ln -sf /usr/local/bin/ffmpeg  /usr/bin/ffmpeg  && \
-    ln -sf /usr/local/bin/ffprobe /usr/bin/ffprobe && \
-    ln -sf /usr/local/bin/ffmpeg  /bin/ffmpeg    && \
-    ln -sf /usr/local/bin/ffprobe /bin/ffprobe
+# Copy tools and libraries
+COPY --from=tools /toolbox/        /usr/local/bin/
+COPY --from=tools /usr/lib/        /usr/local/lib/
+COPY --from=tools /lib/            /usr/local/lib2/
+COPY --from=tools /etc/ssl/certs/  /etc/ssl/certs/
+COPY --from=tools /toolbox/fonts/  /usr/share/fonts/
+COPY --from=tools /toolbox/fontconfig/ /etc/fonts/
 
-# 2) Let n8n’s FFmpeg nodes auto-discover these
-ENV FFMPEG_PATH=/usr/local/bin/ffmpeg \
-    FFPROBE_PATH=/usr/local/bin/ffprobe \
-    FFREPORT="file=/tmp/ffreport-%p-%t.log:level=32"
+# Set up environment
+ENV LD_LIBRARY_PATH="/usr/local/lib:/usr/local/lib2:/usr/lib:/lib:$LD_LIBRARY_PATH"
+ENV PATH="/usr/local/bin:$PATH"
+ENV FONTCONFIG_PATH="/etc/fonts"
+ENV FONTCONFIG_FILE="/etc/fonts/fonts.conf"
 
-# 3) Install fonts & rendering libraries via apt (n8n image is Debian-based)
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-      fontconfig \
-      fonts-dejavu-core \
-      fonts-noto \
-      libass9 \
-      libfribidi0 \
-      libharfbuzz0b \
-      libfreetype6 && \
-    rm -rf /var/lib/apt/lists/* && \
-    fc-cache -f -v
+# FFmpeg environment variables
+ENV FFMPEG_PATH="/usr/local/bin/ffmpeg"
+ENV FFPROBE_PATH="/usr/local/bin/ffprobe"
+ENV FFREPORT="file=/tmp/ffreport-%p-%t.log:level=32"
 
-# 4) Prepare writable temp dirs for FFmpeg
-RUN mkdir -p /tmp/ffmpeg-temp /tmp/ffmpeg-cache /var/log/ffmpeg && \
-    chmod 1777 /tmp/ffmpeg-temp /tmp/ffmpeg-cache && \
+# Arabic text rendering environment
+ENV LANG="en_US.UTF-8"
+ENV LC_ALL="en_US.UTF-8"
+ENV FONTCONFIG_CACHE="/tmp/fontconfig-cache"
+
+# Create necessary directories
+RUN mkdir -p /tmp/ffmpeg-temp /tmp/ffmpeg-cache /var/log/ffmpeg \
+             /tmp/fontconfig-cache /home/node/.fontconfig && \
+    chmod 1777 /tmp/ffmpeg-temp /tmp/ffmpeg-cache /tmp /tmp/fontconfig-cache && \
     chmod 755 /var/log/ffmpeg
 
-# 5) Prep n8n home, backup-data and scripts area
-RUN mkdir -p /scripts /backup-data /home/node/.n8n && \
-    chown -R node:node \
-      /home/node/.n8n \
-      /scripts \
-      /backup-data \
-      /tmp/ffmpeg-temp \
-      /tmp/ffmpeg-cache \
-      /var/log/ffmpeg
+# Make binaries executable
+RUN chmod +x /usr/local/bin/ffmpeg /usr/local/bin/ffprobe && \
+    chmod +x /usr/local/bin/qt-faststart 2>/dev/null || true
 
-# 6) (Optional) install any custom n8n nodes under node:user
+# Create symlinks for compatibility
+RUN ln -sf /usr/local/bin/ffmpeg /usr/bin/ffmpeg && \
+    ln -sf /usr/local/bin/ffprobe /usr/bin/ffprobe && \
+    ln -sf /usr/local/bin/ffmpeg /bin/ffmpeg && \
+    ln -sf /usr/local/bin/ffprobe /bin/ffprobe
+
+# Update font cache
+RUN fc-cache -fv && \
+    fc-list :lang=ar > /tmp/arabic-fonts.txt
+
+# Create directories for n8n
+RUN mkdir -p /scripts /backup-data /home/node/.n8n && \
+    chown -R node:node /home/node/.n8n /scripts /backup-data \
+                       /tmp/ffmpeg-temp /tmp/ffmpeg-cache \
+                       /var/log/ffmpeg /tmp/fontconfig-cache \
+                       /home/node/.fontconfig
+
+# Test FFmpeg with Arabic text capability
+RUN /usr/local/bin/ffmpeg -version && \
+    /usr/local/bin/ffprobe -version && \
+    /usr/local/bin/ffmpeg -filters 2>&1 | grep -E "(drawtext|subtitles|ass)" && \
+    echo "Available Arabic fonts:" && \
+    fc-list :lang=ar | head -10
+
 USER node
+
+# Install Instagram nodes for n8n
 RUN cd /home/node/.n8n && \
     mkdir -p nodes && \
     cd nodes && \
-    npm init -y && \
-    npm install @mookielianhd/n8n-nodes-instagram
+    npm init -y 2>/dev/null && \
+    npm install @mookielianhd/n8n-nodes-instagram 2>/dev/null || true
 
-# 7) Copy your startup scripts in and fix EOL/exec perms
 USER root
-COPY --chown=node:node scripts/ /scripts/
-RUN sed -i 's/\r$//' /scripts/*.sh && chmod +x /scripts/*.sh
 
-# 8) Final verification under node:user
+# Copy and prepare scripts
+COPY --chown=node:node scripts/ /scripts/
+
+RUN sed -i 's/\r$//' /scripts/*.sh && \
+    chmod 0755 /scripts/*.sh
+
+# Final verification as node user
 USER node
-RUN ffmpeg -version && ffprobe -version && \
-    fc-list :lang=ar | head -n5 || echo "Arabic fonts OK" && \
-    echo "✅ FFmpeg + Arabic fonts + n8n ready"
+
+RUN echo "=== Final FFmpeg + Arabic Text Verification ===" && \
+    ffmpeg -version | head -3 && \
+    ffprobe -version | head -3 && \
+    echo "Available Arabic fonts:" && \
+    fc-list :lang=ar | head -5 && \
+    echo "Text rendering filters available:" && \
+    ffmpeg -filters 2>&1 | grep -E "(drawtext|subtitles)" && \
+    echo "=== Verification Complete ==="
 
 WORKDIR /home/node
 
