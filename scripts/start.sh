@@ -65,28 +65,6 @@ fi
 echo ""
 
 # ══════════════════════════════════════
-# 🎬 تشغيل معالج الفيديو مع Cloudflare R2
-# ══════════════════════════════════════
-(
-  echo "🎬 Starting Viral Video Processor with Cloudflare R2..."
-  echo "   Bucket: ${R2_BUCKET_NAME:-renderram}"
-  echo "   Auto cleanup: ${AUTO_CLEANUP:-true}"
-  
-  # تشغيل معالج الفيديو في الخلفية
-  node /scripts/viral-processor.js 2>&1 | sed 's/^/[viral] /' &
-  
-  # انتظار 30 ثانية ثم إرسال إشعار
-  sleep 30
-  if [ -n "${TG_ADMIN_ID:-}" ] && [ -n "${TG_BOT_TOKEN:-}" ]; then
-    curl -sS -X POST "${TG}/sendMessage" \
-      -d "chat_id=${TG_ADMIN_ID}" \
-      -d "parse_mode=HTML" \
-      -d "text=🎬 <b>Viral Video Processor Ready!</b>%0A📦 Storage: Cloudflare R2%0A🗄️ Bucket: ${R2_BUCKET_NAME:-renderram}" \
-      >/dev/null 2>&1 || true
-  fi
-) &
-
-# ══════════════════════════════════════
 # الخلفية: بوت + باك أب
 # ══════════════════════════════════════
 (
