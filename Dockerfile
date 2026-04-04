@@ -1,6 +1,5 @@
 # ─────────────────────────────────────────────────────────────
 # STAGE 1: Alpine tools builder
-# Install ALL tools here, copy binaries to final image
 # ─────────────────────────────────────────────────────────────
 FROM alpine:3.20 AS tools
 
@@ -40,8 +39,15 @@ RUN mkdir -p /toolbox && \
       basename expr base64 fc-cache fc-list; do \
       p="$(which $cmd 2>/dev/null)" && \
         [ -f "$p" ] && cp "$p" /toolbox/ || true; \
-    done && \
-    ls -la /toolbox/
+    done
+
+# Show what python paths actually exist (for debugging)
+RUN echo "=== Python paths in Alpine ===" && \
+    find /usr -name "python*" -type f 2>/dev/null | head -20 && \
+    echo "=== Python lib dirs ===" && \
+    ls /usr/lib/ | grep -i python && \
+    echo "=== Python version ===" && \
+    python3 --version
 
 # Download ffmpeg static binary
 RUN curl -L -o /tmp/ffmpeg.tar.xz \
@@ -52,55 +58,39 @@ RUN curl -L -o /tmp/ffmpeg.tar.xz \
     rm -rf /tmp/ffmpeg-*-static /tmp/ffmpeg.tar.xz && \
     /toolbox/ffmpeg -version | head -1
 
-# Build font cache in builder
-RUN mkdir -p /etc/fonts && \
-    fc-cache -fv 2>/dev/null || true
+# Build font cache
+RUN fc-cache -fv 2>/dev/null || true
 
 # ─────────────────────────────────────────────────────────────
 # STAGE 2: Final n8n hardened image
-# No package manager available — copy everything from builder
 # ─────────────────────────────────────────────────────────────
 FROM docker.n8n.io/n8nio/n8n:2.6.4
 
 USER root
 
-# ── Copy all binaries from builder ───────────────────────────
-COPY --from=tools /toolbox/              /usr/local/bin/
+# ── Copy all binaries ─────────────────────────────────────────
+COPY --from=tools /toolbox/ /usr/local/bin/
 
-# ── Copy ALL shared libraries from builder ───────────────────
-# Python3 libs
-COPY --from=tools /usr/lib/python3.12/   /usr/lib/python3.12/
-COPY --from=tools /usr/lib/python3/      /usr/lib/python3/
-COPY --from=tools /usr/lib/libpython3*   /usr/lib/
-# Font libs
-COPY --from=tools /usr/lib/libfontconfig* /usr/lib/
-COPY --from=tools /usr/lib/libfreetype*   /usr/lib/
-COPY --from=tools /usr/lib/libharfbuzz*   /usr/lib/
-COPY --from=tools /usr/lib/libfribidi*    /usr/lib/
-COPY --from=tools /usr/lib/libass*        /usr/lib/
-# C++ runtime
-COPY --from=tools /usr/lib/libstdc++*     /usr/lib/
-COPY --from=tools /usr/lib/libgcc_s*      /usr/lib/
-# Other deps
-COPY --from=tools /usr/lib/libexpat*      /usr/lib/
-COPY --from=tools /usr/lib/libz*          /usr/lib/
-COPY --from=tools /lib/libz*              /usr/lib/
-# System libs
-COPY --from=tools /lib/ld-musl*           /lib/
-COPY --from=tools /lib/libc.musl*         /lib/
+# ── Copy Python libs (Alpine stores in /usr/lib/python3.X) ───
+# Use wildcard via shell — copy entire python lib directory
+COPY --from=tools /usr/lib/ /usr/lib.tools/
 
 # ── Copy fonts ───────────────────────────────────────────────
-COPY --from=tools /usr/share/fonts/       /usr/share/fonts/
-COPY --from=tools /usr/share/fontconfig/  /usr/share/fontconfig/
-COPY --from=tools /etc/fonts/             /etc/fonts/
-COPY --from=tools /var/cache/fontconfig/  /var/cache/fontconfig/
+COPY --from=tools /usr/share/fonts/      /usr/share/fonts/
+COPY --from=tools /usr/share/fontconfig/ /usr/share/fontconfig/
+COPY --from=tools /etc/fonts/            /etc/fonts/
+COPY --from=tools /var/cache/fontconfig/ /var/cache/fontconfig/
 
 # ── Copy SSL certs ───────────────────────────────────────────
-COPY --from=tools /etc/ssl/certs/         /etc/ssl/certs/
+COPY --from=tools /etc/ssl/certs/ /etc/ssl/certs/
 
-# ── Copy Python stdlib and site-packages ─────────────────────
-COPY --from=tools /usr/lib/python3.12/    /usr/local/lib/python3.12/
-COPY --from=tools /usr/share/python3/     /usr/share/python3/
+# ── Copy musl libc (Alpine's C library) ──────────────────────
+COPY --from=tools /lib/ /lib.tools/
+
+# ── Merge copied libs into correct locations ─────────────────
+RUN cp -rn /usr/lib.tools/* /usr/lib/ 2>/dev/null || true && \
+    cp -rn /lib.tools/*     /lib/     2>/dev/null || true && \
+    rm -rf /usr/lib.tools /lib.tools
 
 # ── Set environment variables ────────────────────────────────
 ENV FFMPEG_PATH="/usr/local/bin/ffmpeg"
@@ -108,24 +98,49 @@ ENV FFPROBE_PATH="/usr/local/bin/ffprobe"
 ENV FFREPORT="file=/tmp/ffreport-%p-%t.log:level=32"
 ENV PATH="/usr/local/bin:$PATH"
 ENV LD_LIBRARY_PATH="/usr/lib:/usr/local/lib:$LD_LIBRARY_PATH"
-ENV PYTHONPATH="/usr/lib/python3.12:/usr/local/lib/python3.12"
-ENV PYTHONHOME="/usr"
 
-# ── Create symlinks ──────────────────────────────────────────
-RUN ln -sf /usr/local/bin/python3  /usr/bin/python3    && \
-    ln -sf /usr/local/bin/python3  /usr/bin/python     && \
-    ln -sf /usr/local/bin/python3  /bin/python3        && \
-    ln -sf /usr/local/bin/python3  /bin/python         && \
-    ln -sf /usr/local/bin/ffmpeg   /usr/bin/ffmpeg     && \
-    ln -sf /usr/local/bin/ffprobe  /usr/bin/ffprobe    && \
-    ln -sf /usr/local/bin/ffmpeg   /bin/ffmpeg         && \
-    ln -sf /usr/local/bin/ffprobe  /bin/ffprobe        && \
-    ln -sf /usr/local/bin/bash     /bin/bash           && \
+# ── Auto-detect Python version and set PYTHONPATH ────────────
+RUN PYVER=$(ls /usr/lib/ | grep "^python3\." | head -1) && \
+    echo "Detected Python version dir: $PYVER" && \
+    echo "export PYTHONPATH=/usr/lib/${PYVER}" >> /etc/environment && \
+    echo "PYVER=${PYVER}" > /tmp/pyver.env
+
+# ── Create all symlinks ──────────────────────────────────────
+RUN ln -sf /usr/local/bin/python3  /usr/bin/python3  2>/dev/null || true && \
+    ln -sf /usr/local/bin/python3  /usr/bin/python   2>/dev/null || true && \
+    ln -sf /usr/local/bin/python3  /bin/python3      2>/dev/null || true && \
+    ln -sf /usr/local/bin/python3  /bin/python       2>/dev/null || true && \
+    ln -sf /usr/local/bin/ffmpeg   /usr/bin/ffmpeg   2>/dev/null || true && \
+    ln -sf /usr/local/bin/ffprobe  /usr/bin/ffprobe  2>/dev/null || true && \
+    ln -sf /usr/local/bin/ffmpeg   /bin/ffmpeg       2>/dev/null || true && \
+    ln -sf /usr/local/bin/ffprobe  /bin/ffprobe      2>/dev/null || true && \
+    ln -sf /usr/local/bin/bash     /bin/bash         2>/dev/null || true && \
     chmod +x \
       /usr/local/bin/ffmpeg \
       /usr/local/bin/ffprobe \
       /usr/local/bin/python3 \
-      /usr/local/bin/bash
+      /usr/local/bin/bash    \
+      2>/dev/null || true
+
+# ── Test Python works with correct lib path ──────────────────
+RUN PYVER=$(ls /usr/lib/ | grep "^python3\." | head -1) && \
+    PYTHONPATH="/usr/lib/${PYVER}" /usr/local/bin/python3 --version && \
+    PYTHONPATH="/usr/lib/${PYVER}" /usr/local/bin/python3 -c "print('Python3 OK')" && \
+    echo "Python PYVER=${PYVER} works"
+
+# ── Set PYTHONPATH permanently based on detected version ─────
+RUN PYVER=$(ls /usr/lib/ | grep "^python3\." | head -1) && \
+    echo "ENV PYTHONPATH=/usr/lib/${PYVER}" && \
+    printf 'export PYTHONPATH=/usr/lib/%s\n' "${PYVER}" >> /etc/profile && \
+    printf 'export PYTHONPATH=/usr/lib/%s\n' "${PYVER}" >> /root/.bashrc  && \
+    printf 'export PYTHONPATH=/usr/lib/%s\n' "${PYVER}" >> /home/node/.bashrc 2>/dev/null || true
+
+# Hardcode PYTHONPATH for the detected version
+RUN PYVER=$(ls /usr/lib/ | grep "^python3\." | head -1) && \
+    echo "Detected: ${PYVER}" && \
+    echo "${PYVER}" > /tmp/detected_pyver
+
+ENV PYTHONPATH="/usr/lib/python3.12:/usr/lib/python3"
 
 # ── Directories + permissions ────────────────────────────────
 RUN mkdir -p \
@@ -165,11 +180,11 @@ RUN sed -i 's/\r$//' /scripts/*.sh 2>/dev/null || true && \
 # ── Final verification ───────────────────────────────────────
 USER node
 
-RUN /usr/local/bin/ffmpeg  -version | head -1 && echo "ffmpeg  OK"
+RUN /usr/local/bin/ffmpeg -version | head -1 && echo "ffmpeg OK"
 RUN /usr/local/bin/ffprobe -version | head -1 && echo "ffprobe OK"
-RUN /usr/local/bin/python3 --version           && echo "python3 OK"
-RUN /usr/local/bin/python3 -c "print('Python3 runtime OK')"
-RUN /usr/local/bin/python3 -c "t='d8a8d8b3d985d984d984d987';r=bytes.fromhex(t).decode('utf-8');print('Arabic decode OK:',r)"
+RUN /usr/local/bin/python3 --version && echo "python3 binary OK"
+RUN /usr/local/bin/python3 -c "print('Python3 import OK')"
+RUN /usr/local/bin/python3 -c "t='d8a8d8b3d985d984d984d987';r=bytes.fromhex(t).decode('utf-8');print('Arabic OK:',r)"
 RUN echo "aGVsbG8=" | base64 -d && echo "" && echo "base64 OK"
 RUN echo "ALL VERIFIED OK"
 
