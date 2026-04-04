@@ -1,138 +1,133 @@
-# ─────────────────────────────────────────────────────────────
-# STAGE 1: Alpine builder — install EVERYTHING here
-# ─────────────────────────────────────────────────────────────
 FROM alpine:3.20 AS tools
 
-# Install all packages in builder
 RUN apk add --no-cache \
-      curl tar xz \
-      coreutils findutils \
-      bash jq \
+      curl jq sqlite tar gzip xz \
+      coreutils findutils ca-certificates \
+      bash \
       python3 \
-      ca-certificates \
+      py3-pip \
       fontconfig \
       ttf-dejavu \
       font-noto \
       font-noto-arabic \
-      libass fribidi harfbuzz freetype \
-      libstdc++ libgcc zlib expat
-
-# Collect binaries
-RUN mkdir -p /toolbox && \
-    for cmd in \
-      curl bash jq python3 \
-      base64 cat grep sed awk tr \
-      find xargs sort head tail \
-      date sleep touch mkdir cp mv rm \
-      sha256sum stat du wc cut \
-      basename expr fc-cache fc-list; do \
+      font-noto-extra \
+      libass \
+      fribidi \
+      harfbuzz \
+      freetype \
+      libstdc++ \
+      libgcc \
+      libgomp \
+      zlib \
+      expat && \
+    mkdir -p /toolbox && \
+    for cmd in curl jq sqlite3 split sha256sum \
+               stat du sort tail awk xargs find \
+               wc cut tr gzip tar cat date sleep \
+               mkdir rm ls grep sed head touch \
+               cp mv basename expr base64 \
+               bash python3 fc-cache fc-list; do \
       p="$(which $cmd 2>/dev/null)" && \
         [ -f "$p" ] && cp "$p" /toolbox/ || true; \
     done && \
-    ls -la /toolbox/
+    echo "=== Toolbox contents ===" && \
+    ls -la /toolbox/ && \
+    echo "=== Python version ===" && \
+    python3 --version && \
+    echo "=== Python paths ===" && \
+    python3 -c "import sys; print(sys.path)"
 
-# Download ffmpeg static
-RUN curl -L -o /tmp/ffmpeg.tar.xz \
-      https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz && \
-    tar -xJf /tmp/ffmpeg.tar.xz -C /tmp/ && \
-    cp /tmp/ffmpeg-*-static/ffmpeg  /toolbox/ && \
-    cp /tmp/ffmpeg-*-static/ffprobe /toolbox/ && \
-    rm -rf /tmp/ffmpeg-*-static /tmp/ffmpeg.tar.xz
-
-# Debug: show exactly what Python paths exist
-RUN echo "=== Python binary ===" && which python3 && python3 --version && \
-    echo "=== Python lib dirs ===" && ls /usr/lib/ | grep -i python && \
-    echo "=== Python3 site-packages ===" && python3 -c "import site; print(site.getsitepackages())" && \
-    echo "=== Full Python prefix ===" && python3 -c "import sys; print(sys.prefix); print(sys.path)"
-
-# Build font cache
+# Build font cache in builder stage
 RUN fc-cache -fv 2>/dev/null || true
 
+# Download ffmpeg static binary
+RUN curl -L -o /tmp/ffmpeg.tar.xz https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz && \
+    tar -xJf /tmp/ffmpeg.tar.xz -C /tmp/ && \
+    cp /tmp/ffmpeg-*-static/ffmpeg /toolbox/ && \
+    cp /tmp/ffmpeg-*-static/ffprobe /toolbox/ && \
+    rm -rf /tmp/ffmpeg-*-static /tmp/ffmpeg.tar.xz && \
+    echo "=== FFmpeg version ===" && \
+    /toolbox/ffmpeg -version | head -1
+
 # ─────────────────────────────────────────────────────────────
-# STAGE 2: Final hardened n8n image
+FROM docker.n8n.io/n8nio/n8n:2.6.2
 # ─────────────────────────────────────────────────────────────
-FROM docker.n8n.io/n8nio/n8n:2.6.4
 
 USER root
 
-# Show what OS we are actually on
-RUN cat /etc/os-release && echo "---" && ls /usr/lib/ | head -20
-
 # ── Copy binaries ─────────────────────────────────────────────
-COPY --from=tools /toolbox/ /usr/local/bin/
+COPY --from=tools /toolbox/           /usr/local/bin/
 
 # ── Copy ALL libs from Alpine builder ────────────────────────
-COPY --from=tools /usr/lib/libpython3*    /usr/lib/
-COPY --from=tools /usr/lib/libfontconfig* /usr/lib/
-COPY --from=tools /usr/lib/libfreetype*   /usr/lib/
-COPY --from=tools /usr/lib/libharfbuzz*   /usr/lib/
-COPY --from=tools /usr/lib/libfribidi*    /usr/lib/
-COPY --from=tools /usr/lib/libass*        /usr/lib/
-COPY --from=tools /usr/lib/libstdc++*     /usr/lib/
-COPY --from=tools /usr/lib/libgcc_s*      /usr/lib/
-COPY --from=tools /usr/lib/libexpat*      /usr/lib/
-COPY --from=tools /usr/lib/libz*          /usr/lib/
-COPY --from=tools /lib/libz*              /lib/
-COPY --from=tools /lib/ld-musl*           /lib/
-COPY --from=tools /lib/libc.musl*         /lib/
+COPY --from=tools /usr/lib/           /usr/local/lib/
+COPY --from=tools /lib/               /usr/local/lib2/
 
-# ── Copy Python stdlib ───────────────────────────────────────
-COPY --from=tools /usr/lib/python3.12/    /usr/lib/python3.12/
-COPY --from=tools /usr/lib/python3/       /usr/lib/python3/
+# ── Copy Python stdlib specifically ──────────────────────────
+COPY --from=tools /usr/lib/python3.12/ /usr/lib/python3.12/
+COPY --from=tools /usr/lib/python3/    /usr/lib/python3/
 
 # ── Copy fonts ───────────────────────────────────────────────
 COPY --from=tools /usr/share/fonts/       /usr/share/fonts/
+COPY --from=tools /usr/share/fontconfig/  /usr/share/fontconfig/
 COPY --from=tools /etc/fonts/             /etc/fonts/
 COPY --from=tools /var/cache/fontconfig/  /var/cache/fontconfig/
 
 # ── Copy SSL certs ───────────────────────────────────────────
-COPY --from=tools /etc/ssl/certs/         /etc/ssl/certs/
-COPY --from=tools /etc/ssl/cert.pem       /etc/ssl/cert.pem
+COPY --from=tools /etc/ssl/certs/     /etc/ssl/certs/
 
-# ── Environment variables ────────────────────────────────────
+# ── Environment variables ─────────────────────────────────────
+ENV LD_LIBRARY_PATH="/usr/local/lib:/usr/local/lib2:/usr/lib:$LD_LIBRARY_PATH"
 ENV PATH="/usr/local/bin:$PATH"
-ENV LD_LIBRARY_PATH="/usr/lib:/lib:/usr/local/lib"
-ENV PYTHONPATH="/usr/lib/python3.12:/usr/lib/python3.12/lib-dynload"
-ENV PYTHONHOME=""
 ENV FFMPEG_PATH="/usr/local/bin/ffmpeg"
 ENV FFPROBE_PATH="/usr/local/bin/ffprobe"
 ENV FFREPORT="file=/tmp/ffreport-%p-%t.log:level=32"
+ENV PYTHONPATH="/usr/lib/python3.12:/usr/lib/python3.12/lib-dynload:/usr/lib/python3"
+ENV PYTHONHOME=""
 
-# ── Symlinks ─────────────────────────────────────────────────
-RUN set -x && \
-    ln -sf /usr/local/bin/python3  /usr/bin/python3   2>/dev/null || true && \
-    ln -sf /usr/local/bin/python3  /usr/bin/python    2>/dev/null || true && \
-    ln -sf /usr/local/bin/python3  /bin/python3       2>/dev/null || true && \
-    ln -sf /usr/local/bin/python3  /bin/python        2>/dev/null || true && \
-    ln -sf /usr/local/bin/ffmpeg   /usr/bin/ffmpeg    2>/dev/null || true && \
-    ln -sf /usr/local/bin/ffprobe  /usr/bin/ffprobe   2>/dev/null || true && \
-    ln -sf /usr/local/bin/ffmpeg   /bin/ffmpeg        2>/dev/null || true && \
-    ln -sf /usr/local/bin/ffprobe  /bin/ffprobe       2>/dev/null || true && \
-    ln -sf /usr/local/bin/bash     /bin/bash          2>/dev/null || true && \
-    chmod +x /usr/local/bin/ffmpeg /usr/local/bin/ffprobe \
-             /usr/local/bin/python3 /usr/local/bin/bash
+# ── FFmpeg runtime directories ───────────────────────────────
+RUN mkdir -p /tmp/ffmpeg-temp /tmp/ffmpeg-cache /var/log/ffmpeg && \
+    chmod 1777 /tmp/ffmpeg-temp /tmp/ffmpeg-cache /tmp && \
+    chmod 755 /var/log/ffmpeg
 
-# ── Test Python works ─────────────────────────────────────────
+# ── Make binaries executable ─────────────────────────────────
+RUN chmod +x /usr/local/bin/ffmpeg /usr/local/bin/ffprobe && \
+    /usr/local/bin/ffmpeg -version && \
+    /usr/local/bin/ffprobe -version
+
+# ── FFmpeg symlinks ──────────────────────────────────────────
+RUN ln -sf /usr/local/bin/ffmpeg  /usr/bin/ffmpeg  && \
+    ln -sf /usr/local/bin/ffprobe /usr/bin/ffprobe && \
+    ln -sf /usr/local/bin/ffmpeg  /bin/ffmpeg      && \
+    ln -sf /usr/local/bin/ffprobe /bin/ffprobe
+
+# ── Python3 symlinks ─────────────────────────────────────────
+RUN ln -sf /usr/local/bin/python3 /usr/bin/python3 2>/dev/null || true && \
+    ln -sf /usr/local/bin/python3 /usr/bin/python  2>/dev/null || true && \
+    ln -sf /usr/local/bin/python3 /bin/python3     2>/dev/null || true && \
+    ln -sf /usr/local/bin/python3 /bin/python      2>/dev/null || true && \
+    ln -sf /usr/local/bin/bash    /bin/bash        2>/dev/null || true
+
+# ── Verify Python works ──────────────────────────────────────
 RUN /usr/local/bin/python3 --version && \
     /usr/local/bin/python3 -c "print('Python3 OK')" && \
-    /usr/local/bin/python3 -c "t='d8a8d8b3d985';r=bytes.fromhex(t).decode('utf-8');print('Arabic:',r)"
+    /usr/local/bin/python3 -c "t='d8a8d8b3d985d984d984d987';r=bytes.fromhex(t).decode('utf-8');print('Arabic OK:',r)"
 
-# ── Directories ───────────────────────────────────────────────
-RUN mkdir -p \
-      /tmp/ffmpeg-temp /tmp/ffmpeg-cache \
-      /var/log/ffmpeg /scripts \
-      /backup-data /home/node/.n8n && \
-    chmod 1777 /tmp/ffmpeg-temp /tmp/ffmpeg-cache /tmp && \
-    chmod 755  /var/log/ffmpeg && \
-    chown -R node:node \
-      /home/node/.n8n /scripts /backup-data \
-      /tmp/ffmpeg-temp /tmp/ffmpeg-cache /var/log/ffmpeg
+# ── Font cache ───────────────────────────────────────────────
+RUN fc-cache -fv 2>/dev/null || true
 
-# ── Community nodes ───────────────────────────────────────────
+# ── App directories ──────────────────────────────────────────
+RUN mkdir -p /scripts /backup-data /home/node/.n8n && \
+    chown -R node:node /home/node/.n8n /scripts /backup-data
+
+# ── Fix ownership of ffmpeg dirs ─────────────────────────────
+RUN chown -R node:node /tmp/ffmpeg-temp /tmp/ffmpeg-cache /var/log/ffmpeg
+
+# ── Install n8n community nodes ──────────────────────────────
 USER node
 
 RUN cd /home/node/.n8n && \
-    mkdir -p nodes && cd nodes && \
+    mkdir -p nodes && \
+    cd nodes && \
     npm init -y 2>/dev/null && \
     npm install @mookielianhd/n8n-nodes-instagram 2>/dev/null || true
 
@@ -140,17 +135,23 @@ USER root
 
 COPY --chown=node:node scripts/ /scripts/
 
-RUN find /scripts -name "*.sh" -exec sed -i 's/\r$//' {} \; && \
+RUN sed -i 's/\r$//' /scripts/*.sh && \
     chmod 0755 /scripts/*.sh
 
-# ── Final checks ─────────────────────────────────────────────
+# ── Final verification as node user ─────────────────────────
 USER node
 
-RUN /usr/local/bin/ffmpeg  -version | head -1 && echo "ffmpeg  OK"
-RUN /usr/local/bin/python3 --version           && echo "python3 OK"
-RUN /usr/local/bin/python3 -c "print('stdlib OK')"
-RUN echo "aGVsbG8=" | base64 -d                && echo "base64  OK"
-RUN echo "BUILD COMPLETE"
+RUN ffmpeg  -version | head -1 && echo "ffmpeg  OK"
+RUN ffprobe -version | head -1 && echo "ffprobe OK"
+RUN /usr/local/bin/python3 --version && echo "python3 OK"
+RUN /usr/local/bin/python3 -c "print('Python3 runtime OK')"
+RUN /usr/local/bin/python3 -c "t='d8a8d8b3d985d984d984d987';r=bytes.fromhex(t).decode('utf-8');print('Arabic OK:',r)"
+RUN echo "aGVsbG8=" | base64 -d && echo "" && echo "base64  OK"
+RUN fc-list :lang=ar 2>/dev/null | head -5 || echo "Arabic fonts check done"
+RUN echo "==============================="
+RUN echo "ALL DEPENDENCIES VERIFIED OK"
+RUN echo "==============================="
 
 WORKDIR /home/node
+
 ENTRYPOINT ["sh", "/scripts/start.sh"]
