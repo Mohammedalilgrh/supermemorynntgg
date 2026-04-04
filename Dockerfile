@@ -31,43 +31,47 @@ RUN curl -L -o /tmp/ffmpeg.tar.xz \
 
 # ─────────────────────────────────────────────────────────────
 # STAGE 2: Final n8n image
+# n8n:2.6.4 is based on node:20-alpine — so we use apk
 # ─────────────────────────────────────────────────────────────
 FROM docker.n8n.io/n8nio/n8n:2.6.4
 
 USER root
 
+# ── Detect OS and confirm it is Alpine ───────────────────────
+RUN cat /etc/os-release
+
+# ── Copy ffmpeg + shell tools from builder stage ─────────────
 COPY --from=tools /toolbox/       /usr/local/bin/
 COPY --from=tools /etc/ssl/certs/ /etc/ssl/certs/
 
-# ── Install everything via apt-get (n8n base is Debian) ──────
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
+# ── Install everything via apk (Alpine package manager) ──────
+RUN apk add --no-cache \
       python3 \
-      python3-minimal \
-      fontconfig \
-      fonts-dejavu-core \
-      fonts-dejavu-extra \
-      fonts-noto \
-      fonts-noto-core \
-      fonts-noto-extra \
-      fonts-noto-ui-core \
-      fonts-arabeyes \
-      fonts-kacst \
-      fonts-kacst-one \
-      libass9 \
-      libfribidi0 \
-      libharfbuzz0b \
-      libfreetype6 \
+      py3-pip \
       bash \
       coreutils \
       findutils \
       curl \
       jq \
-      sqlite3 \
+      sqlite \
       ca-certificates \
-    && rm -rf /var/lib/apt/lists/* \
-    && apt-get clean
+      fontconfig \
+      ttf-dejavu \
+      font-noto \
+      font-noto-arabic \
+      font-noto-extra \
+      libass \
+      fribidi \
+      harfbuzz \
+      freetype \
+      libstdc++ \
+      libgcc \
+      zlib \
+      expat \
+    && python3 --version \
+    && echo "apk installs done"
 
+# ── Rebuild font cache ────────────────────────────────────────
 RUN fc-cache -fv 2>/dev/null || true
 
 # ── Python3 symlinks ─────────────────────────────────────────
@@ -76,7 +80,7 @@ RUN ln -sf /usr/bin/python3 /usr/local/bin/python3 && \
     ln -sf /usr/bin/python3 /bin/python3            && \
     ln -sf /usr/bin/python3 /bin/python
 
-# ── FFmpeg setup ─────────────────────────────────────────────
+# ── FFmpeg environment ───────────────────────────────────────
 ENV FFMPEG_PATH="/usr/local/bin/ffmpeg"
 ENV FFPROBE_PATH="/usr/local/bin/ffprobe"
 ENV FFREPORT="file=/tmp/ffreport-%p-%t.log:level=32"
@@ -117,22 +121,23 @@ RUN cd /home/node/.n8n && \
 
 USER root
 
+# ── Copy startup scripts ─────────────────────────────────────
 COPY --chown=node:node scripts/ /scripts/
 
 RUN sed -i 's/\r$//' /scripts/*.sh && \
     chmod 0755 /scripts/*.sh
 
-# ── Final verification (ALL ONE-LINERS — no multiline python) ─
+# ── Final verification ───────────────────────────────────────
 USER node
 
-RUN ffmpeg -version | head -1
-RUN ffprobe -version | head -1
-RUN python3 --version
-RUN python3 -c "print('Python3 OK')"
-RUN python3 -c "t='d8a8d8b3d985d984d984d987';r=bytes.fromhex(t).decode();print('Arabic OK:',r)"
-RUN echo "aGVsbG8gd29ybGQ=" | base64 -d && echo ""
-RUN fc-list :lang=ar 2>/dev/null | head -3 || echo "Arabic fonts listed"
-RUN echo "ALL DEPENDENCIES VERIFIED SUCCESSFULLY"
+RUN ffmpeg  -version | head -1 && echo "ffmpeg OK"
+RUN ffprobe -version | head -1 && echo "ffprobe OK"
+RUN python3 --version          && echo "python3 OK"
+RUN python3 -c "print('Python3 runtime OK')"
+RUN python3 -c "t='d8a8d8b3d985d984d984d987';r=bytes.fromhex(t).decode('utf-8');print('Arabic OK:',r)"
+RUN echo "aGVsbG8=" | base64 -d && echo "" && echo "base64 OK"
+RUN fc-list :lang=ar 2>/dev/null | head -3 || echo "Arabic fonts check done"
+RUN echo "ALL VERIFIED OK"
 
 WORKDIR /home/node
 
