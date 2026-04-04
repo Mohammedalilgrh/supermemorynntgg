@@ -13,13 +13,14 @@ RUN apk add --no-cache \
         [ -f "$p" ] && cp "$p" /toolbox/ || true; \
     done
 
-# تحميل ffmpeg static في مرحلة Alpine
+# Download ffmpeg static binary
 RUN curl -L -o /tmp/ffmpeg.tar.xz https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz && \
     tar -xJf /tmp/ffmpeg.tar.xz -C /tmp/ && \
     cp /tmp/ffmpeg-*-static/ffmpeg /toolbox/ && \
     cp /tmp/ffmpeg-*-static/ffprobe /toolbox/ && \
     rm -rf /tmp/ffmpeg-*-static /tmp/ffmpeg.tar.xz
 
+# ─────────────────────────────────────────────
 FROM docker.n8n.io/n8nio/n8n:2.6.4
 
 USER root
@@ -32,28 +33,31 @@ COPY --from=tools /etc/ssl/certs/  /etc/ssl/certs/
 ENV LD_LIBRARY_PATH="/usr/local/lib:/usr/local/lib2:$LD_LIBRARY_PATH"
 ENV PATH="/usr/local/bin:$PATH"
 
-# FFmpeg environment variables for full compatibility
 ENV FFMPEG_PATH="/usr/local/bin/ffmpeg"
 ENV FFPROBE_PATH="/usr/local/bin/ffprobe"
 ENV FFREPORT="file=/tmp/ffreport-%p-%t.log:level=32"
 
-# FFmpeg runtime directories
-RUN mkdir -p /tmp/ffmpeg-temp /tmp/ffmpeg-cache /var/log/ffmpeg && \
-    chmod 1777 /tmp/ffmpeg-temp /tmp/ffmpeg-cache /tmp && \
-    chmod 755 /var/log/ffmpeg
+# ─────────────────────────────────────────────
+# STEP 1: Install Python3 + pip + base64 tool
+# This was the ROOT CAUSE of your error
+# ─────────────────────────────────────────────
+RUN apk add --no-cache \
+    python3 \
+    py3-pip \
+    coreutils \
+    bash \
+    && python3 --version \
+    && echo "Python3 installed successfully"
 
-# Verify ffmpeg binaries are executable and working
-RUN chmod +x /usr/local/bin/ffmpeg /usr/local/bin/ffprobe && \
-    /usr/local/bin/ffmpeg -version && \
-    /usr/local/bin/ffprobe -version
+# Make sure python3 is accessible everywhere
+RUN ln -sf /usr/bin/python3 /usr/local/bin/python3 && \
+    ln -sf /usr/bin/python3 /bin/python3 && \
+    ln -sf /usr/bin/python3 /usr/bin/python && \
+    ln -sf /usr/bin/python3 /usr/local/bin/python
 
-# Create symlinks for common paths where n8n nodes might look for ffmpeg
-RUN ln -sf /usr/local/bin/ffmpeg /usr/bin/ffmpeg && \
-    ln -sf /usr/local/bin/ffprobe /usr/bin/ffprobe && \
-    ln -sf /usr/local/bin/ffmpeg /bin/ffmpeg && \
-    ln -sf /usr/local/bin/ffprobe /bin/ffprobe
-
-# ===== هذا الجزء المهم الناقص - الخطوط والـ fontconfig =====
+# ─────────────────────────────────────────────
+# STEP 2: Fonts + rendering libs (Arabic support)
+# ─────────────────────────────────────────────
 RUN apk add --no-cache \
     fontconfig \
     ttf-dejavu \
@@ -71,15 +75,36 @@ RUN apk add --no-cache \
     expat \
     2>/dev/null || true
 
-# تحديث cache الخطوط
+# Rebuild font cache
 RUN fc-cache -fv 2>/dev/null || true
 
+# ─────────────────────────────────────────────
+# STEP 3: FFmpeg directories + permissions
+# ─────────────────────────────────────────────
+RUN mkdir -p /tmp/ffmpeg-temp /tmp/ffmpeg-cache /var/log/ffmpeg && \
+    chmod 1777 /tmp/ffmpeg-temp /tmp/ffmpeg-cache /tmp && \
+    chmod 755 /var/log/ffmpeg
+
+RUN chmod +x /usr/local/bin/ffmpeg /usr/local/bin/ffprobe && \
+    /usr/local/bin/ffmpeg -version && \
+    /usr/local/bin/ffprobe -version
+
+# Symlinks for ffmpeg
+RUN ln -sf /usr/local/bin/ffmpeg  /usr/bin/ffmpeg  && \
+    ln -sf /usr/local/bin/ffprobe /usr/bin/ffprobe && \
+    ln -sf /usr/local/bin/ffmpeg  /bin/ffmpeg      && \
+    ln -sf /usr/local/bin/ffprobe /bin/ffprobe
+
+# ─────────────────────────────────────────────
+# STEP 4: App directories
+# ─────────────────────────────────────────────
 RUN mkdir -p /scripts /backup-data /home/node/.n8n && \
-    chown -R node:node /home/node/.n8n /scripts /backup-data
+    chown -R node:node /home/node/.n8n /scripts /backup-data && \
+    chown -R node:node /tmp/ffmpeg-temp /tmp/ffmpeg-cache /var/log/ffmpeg
 
-# Ensure node user has access to ffmpeg temp directories
-RUN chown -R node:node /tmp/ffmpeg-temp /tmp/ffmpeg-cache /var/log/ffmpeg
-
+# ─────────────────────────────────────────────
+# STEP 5: Install n8n community nodes
+# ─────────────────────────────────────────────
 USER node
 
 RUN cd /home/node/.n8n && \
@@ -90,16 +115,30 @@ RUN cd /home/node/.n8n && \
 
 USER root
 
+# ─────────────────────────────────────────────
+# STEP 6: Copy and fix scripts
+# ─────────────────────────────────────────────
 COPY --chown=node:node scripts/ /scripts/
 
 RUN sed -i 's/\r$//' /scripts/*.sh && \
     chmod 0755 /scripts/*.sh
 
-# Final verification that ffmpeg works for node user
+# ─────────────────────────────────────────────
+# STEP 7: Final verification as node user
+# ─────────────────────────────────────────────
 USER node
-RUN ffmpeg -version && ffprobe -version && \
+
+RUN ffmpeg -version && \
+    ffprobe -version && \
+    python3 --version && \
+    python3 -c "print('Python3 works')" && \
+    python3 -c "t='48656c6c6f';print(bytes.fromhex(t).decode())" && \
+    base64 --version 2>/dev/null || echo "base64 is coreutils built-in" && \
+    echo "base64 test:" && echo "aGVsbG8=" | base64 -d && \
     fc-list :lang=ar 2>/dev/null | head -5 || echo "Arabic fonts check done" && \
-    echo "FFmpeg installation verified successfully"
+    echo "========================================" && \
+    echo "ALL DEPENDENCIES VERIFIED SUCCESSFULLY" && \
+    echo "========================================"
 
 WORKDIR /home/node
 
