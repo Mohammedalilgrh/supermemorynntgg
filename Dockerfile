@@ -29,15 +29,28 @@ RUN apk add --no-cache \
                bash python3 fc-cache fc-list; do \
       p="$(which $cmd 2>/dev/null)" && \
         [ -f "$p" ] && cp "$p" /toolbox/ || true; \
-    done && \
-    echo "=== Toolbox contents ===" && \
-    ls -la /toolbox/ && \
-    echo "=== Python version ===" && \
-    python3 --version && \
-    echo "=== Python paths ===" && \
-    python3 -c "import sys; print(sys.path)"
+    done
 
-# Build font cache in builder stage
+# Show exactly what Python paths exist in Alpine 3.20
+RUN echo "=== Python version ===" && python3 --version && \
+    echo "=== /usr/lib python dirs ===" && ls /usr/lib/ | grep -i python && \
+    echo "=== Python sys.path ===" && python3 -c "import sys; [print(p) for p in sys.path]" && \
+    echo "=== Python prefix ===" && python3 -c "import sys; print('prefix:', sys.prefix)" && \
+    echo "=== Find all python lib dirs ===" && find /usr/lib -maxdepth 2 -name "*.py" | head -5
+
+# Copy python libs into /pylib so we can safely COPY them to final image
+RUN mkdir -p /pylib && \
+    PYVER=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')") && \
+    echo "Python version: $PYVER" && \
+    cp -r /usr/lib/python${PYVER}/ /pylib/python${PYVER}/ && \
+    echo "Copied Python ${PYVER} stdlib to /pylib/" && \
+    ls /pylib/
+
+# Save python version to a file so we can read it
+RUN python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" > /pylib/version.txt && \
+    cat /pylib/version.txt
+
+# Build font cache
 RUN fc-cache -fv 2>/dev/null || true
 
 # Download ffmpeg static binary
@@ -46,7 +59,6 @@ RUN curl -L -o /tmp/ffmpeg.tar.xz https://johnvansickle.com/ffmpeg/releases/ffmp
     cp /tmp/ffmpeg-*-static/ffmpeg /toolbox/ && \
     cp /tmp/ffmpeg-*-static/ffprobe /toolbox/ && \
     rm -rf /tmp/ffmpeg-*-static /tmp/ffmpeg.tar.xz && \
-    echo "=== FFmpeg version ===" && \
     /toolbox/ffmpeg -version | head -1
 
 # ─────────────────────────────────────────────────────────────
@@ -56,24 +68,22 @@ FROM docker.n8n.io/n8nio/n8n:2.6.2
 USER root
 
 # ── Copy binaries ─────────────────────────────────────────────
-COPY --from=tools /toolbox/           /usr/local/bin/
+COPY --from=tools /toolbox/        /usr/local/bin/
 
 # ── Copy ALL libs from Alpine builder ────────────────────────
-COPY --from=tools /usr/lib/           /usr/local/lib/
-COPY --from=tools /lib/               /usr/local/lib2/
+COPY --from=tools /usr/lib/        /usr/local/lib/
+COPY --from=tools /lib/            /usr/local/lib2/
 
-# ── Copy Python stdlib specifically ──────────────────────────
-COPY --from=tools /usr/lib/python3.12/ /usr/lib/python3.12/
-COPY --from=tools /usr/lib/python3/    /usr/lib/python3/
+# ── Copy Python stdlib from /pylib (guaranteed to exist) ─────
+COPY --from=tools /pylib/          /usr/lib/python-alpine/
 
 # ── Copy fonts ───────────────────────────────────────────────
-COPY --from=tools /usr/share/fonts/       /usr/share/fonts/
-COPY --from=tools /usr/share/fontconfig/  /usr/share/fontconfig/
-COPY --from=tools /etc/fonts/             /etc/fonts/
-COPY --from=tools /var/cache/fontconfig/  /var/cache/fontconfig/
+COPY --from=tools /usr/share/fonts/      /usr/share/fonts/
+COPY --from=tools /etc/fonts/            /etc/fonts/
+COPY --from=tools /var/cache/fontconfig/ /var/cache/fontconfig/
 
 # ── Copy SSL certs ───────────────────────────────────────────
-COPY --from=tools /etc/ssl/certs/     /etc/ssl/certs/
+COPY --from=tools /etc/ssl/certs/  /etc/ssl/certs/
 
 # ── Environment variables ─────────────────────────────────────
 ENV LD_LIBRARY_PATH="/usr/local/lib:/usr/local/lib2:/usr/lib:$LD_LIBRARY_PATH"
@@ -81,8 +91,25 @@ ENV PATH="/usr/local/bin:$PATH"
 ENV FFMPEG_PATH="/usr/local/bin/ffmpeg"
 ENV FFPROBE_PATH="/usr/local/bin/ffprobe"
 ENV FFREPORT="file=/tmp/ffreport-%p-%t.log:level=32"
-ENV PYTHONPATH="/usr/lib/python3.12:/usr/lib/python3.12/lib-dynload:/usr/lib/python3"
-ENV PYTHONHOME=""
+
+# ── Set PYTHONPATH dynamically from version file ─────────────
+RUN PYVER=$(cat /usr/lib/python-alpine/version.txt) && \
+    echo "Setting up Python ${PYVER}" && \
+    PYDIR="/usr/lib/python-alpine/python${PYVER}" && \
+    echo "PYTHONPATH=${PYDIR}:${PYDIR}/lib-dynload" >> /etc/environment && \
+    ln -sf "$PYDIR" "/usr/lib/python${PYVER}" && \
+    echo "Python stdlib linked at /usr/lib/python${PYVER}"
+
+# ── Permanently export PYTHONPATH ────────────────────────────
+RUN PYVER=$(cat /usr/lib/python-alpine/version.txt) && \
+    printf 'export PYTHONPATH=/usr/lib/python%s:/usr/lib/python%s/lib-dynload\n' \
+      "${PYVER}" "${PYVER}" >> /etc/profile && \
+    printf 'export PYTHONPATH=/usr/lib/python%s:/usr/lib/python%s/lib-dynload\n' \
+      "${PYVER}" "${PYVER}" >> /root/.profile
+
+# Set a working PYTHONPATH — will be overridden by dynamic one above
+# Alpine 3.20 ships Python 3.12, Alpine 3.21+ ships Python 3.13
+ENV PYTHONPATH="/usr/lib/python3.12:/usr/lib/python3.12/lib-dynload"
 
 # ── FFmpeg runtime directories ───────────────────────────────
 RUN mkdir -p /tmp/ffmpeg-temp /tmp/ffmpeg-cache /var/log/ffmpeg && \
@@ -91,8 +118,8 @@ RUN mkdir -p /tmp/ffmpeg-temp /tmp/ffmpeg-cache /var/log/ffmpeg && \
 
 # ── Make binaries executable ─────────────────────────────────
 RUN chmod +x /usr/local/bin/ffmpeg /usr/local/bin/ffprobe && \
-    /usr/local/bin/ffmpeg -version && \
-    /usr/local/bin/ffprobe -version
+    /usr/local/bin/ffmpeg  -version | head -1 && \
+    /usr/local/bin/ffprobe -version | head -1
 
 # ── FFmpeg symlinks ──────────────────────────────────────────
 RUN ln -sf /usr/local/bin/ffmpeg  /usr/bin/ffmpeg  && \
@@ -108,8 +135,12 @@ RUN ln -sf /usr/local/bin/python3 /usr/bin/python3 2>/dev/null || true && \
     ln -sf /usr/local/bin/bash    /bin/bash        2>/dev/null || true
 
 # ── Verify Python works ──────────────────────────────────────
-RUN /usr/local/bin/python3 --version && \
+RUN PYVER=$(cat /usr/lib/python-alpine/version.txt) && \
+    PYTHONPATH="/usr/lib/python${PYVER}:/usr/lib/python${PYVER}/lib-dynload" \
+    /usr/local/bin/python3 --version && \
+    PYTHONPATH="/usr/lib/python${PYVER}:/usr/lib/python${PYVER}/lib-dynload" \
     /usr/local/bin/python3 -c "print('Python3 OK')" && \
+    PYTHONPATH="/usr/lib/python${PYVER}:/usr/lib/python${PYVER}/lib-dynload" \
     /usr/local/bin/python3 -c "t='d8a8d8b3d985d984d984d987';r=bytes.fromhex(t).decode('utf-8');print('Arabic OK:',r)"
 
 # ── Font cache ───────────────────────────────────────────────
@@ -117,10 +148,8 @@ RUN fc-cache -fv 2>/dev/null || true
 
 # ── App directories ──────────────────────────────────────────
 RUN mkdir -p /scripts /backup-data /home/node/.n8n && \
-    chown -R node:node /home/node/.n8n /scripts /backup-data
-
-# ── Fix ownership of ffmpeg dirs ─────────────────────────────
-RUN chown -R node:node /tmp/ffmpeg-temp /tmp/ffmpeg-cache /var/log/ffmpeg
+    chown -R node:node /home/node/.n8n /scripts /backup-data && \
+    chown -R node:node /tmp/ffmpeg-temp /tmp/ffmpeg-cache /var/log/ffmpeg
 
 # ── Install n8n community nodes ──────────────────────────────
 USER node
@@ -143,9 +172,15 @@ USER node
 
 RUN ffmpeg  -version | head -1 && echo "ffmpeg  OK"
 RUN ffprobe -version | head -1 && echo "ffprobe OK"
-RUN /usr/local/bin/python3 --version && echo "python3 OK"
-RUN /usr/local/bin/python3 -c "print('Python3 runtime OK')"
-RUN /usr/local/bin/python3 -c "t='d8a8d8b3d985d984d984d987';r=bytes.fromhex(t).decode('utf-8');print('Arabic OK:',r)"
+RUN PYVER=$(cat /usr/lib/python-alpine/version.txt) && \
+    PYTHONPATH="/usr/lib/python${PYVER}:/usr/lib/python${PYVER}/lib-dynload" \
+    /usr/local/bin/python3 --version && echo "python3 OK"
+RUN PYVER=$(cat /usr/lib/python-alpine/version.txt) && \
+    PYTHONPATH="/usr/lib/python${PYVER}:/usr/lib/python${PYVER}/lib-dynload" \
+    /usr/local/bin/python3 -c "print('Python3 runtime OK')"
+RUN PYVER=$(cat /usr/lib/python-alpine/version.txt) && \
+    PYTHONPATH="/usr/lib/python${PYVER}:/usr/lib/python${PYVER}/lib-dynload" \
+    /usr/local/bin/python3 -c "t='d8a8d8b3d985d984d984d987';r=bytes.fromhex(t).decode('utf-8');print('Arabic OK:',r)"
 RUN echo "aGVsbG8=" | base64 -d && echo "" && echo "base64  OK"
 RUN fc-list :lang=ar 2>/dev/null | head -5 || echo "Arabic fonts check done"
 RUN echo "==============================="
