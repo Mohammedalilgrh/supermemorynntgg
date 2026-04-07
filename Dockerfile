@@ -1,175 +1,147 @@
 # ─────────────────────────────────────────────────────────────
-# Stage 1: Build tools from Alpine
+# Stage 1: Minimal tools builder
 # ─────────────────────────────────────────────────────────────
 FROM alpine:3.20 AS tools
 
-# Install all required packages
+# Install only essential packages
 RUN apk add --no-cache \
-      curl jq sqlite tar gzip xz \
-      coreutils findutils ca-certificates \
-      bash \
+      curl xz \
       python3 \
-      py3-pip \
-      fontconfig \
-      ttf-dejavu \
-      font-noto \
-      font-noto-arabic \
-      font-noto-extra \
-      libass \
-      fribidi \
-      harfbuzz \
-      freetype \
-      libstdc++ \
-      libgcc \
-      libgomp \
-      zlib \
-      expat && \
-    mkdir -p /toolbox && \
-    for cmd in curl jq sqlite3 split sha256sum \
-               stat du sort tail awk xargs find \
-               wc cut tr gzip tar cat date sleep \
-               mkdir rm ls grep sed head touch \
-               cp mv basename expr base64 \
-               bash python3 fc-cache fc-list; do \
-      p="$(which $cmd 2>/dev/null)" && \
-        [ -f "$p" ] && cp "$p" /toolbox/ || true; \
+      fontconfig ttf-dejavu font-noto-arabic \
+      libass fribidi harfbuzz freetype \
+      binutils
+
+# Create toolbox with ONLY essential binaries
+RUN mkdir -p /toolbox /libs && \
+    for cmd in python3 fc-cache fc-list; do \
+      p="$(which $cmd 2>/dev/null)" && [ -f "$p" ] && cp "$p" /toolbox/ || true; \
     done
 
-# Copy Python stdlib to /pylib
-RUN mkdir -p /pylib && \
-    PYVER=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')") && \
-    echo "Python version: $PYVER" && \
-    cp -r /usr/lib/python${PYVER}/ /pylib/python${PYVER}/ && \
-    python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" > /pylib/version.txt && \
-    echo "Copied Python ${PYVER} stdlib to /pylib/"
+# Download and extract ffmpeg - keep only essentials
+RUN curl -L -o /tmp/ff.tar.xz https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz && \
+    tar -xJf /tmp/ff.tar.xz -C /tmp/ && \
+    cp /tmp/ffmpeg-*-static/ffmpeg /tmp/ffmpeg-*-static/ffprobe /toolbox/ && \
+    strip /toolbox/ffmpeg /toolbox/ffprobe 2>/dev/null || true && \
+    rm -rf /tmp/*
 
-# Build font cache
-RUN fc-cache -fv 2>/dev/null || true
+# Copy ONLY required libraries (not entire /usr/lib)
+RUN for lib in \
+      libpython3*.so* \
+      libfontconfig.so* \
+      libfreetype.so* \
+      libfribidi.so* \
+      libharfbuzz.so* \
+      libass.so* \
+      libexpat.so* \
+      libbz2.so* \
+      libpng*.so* \
+      libbrotli*.so* \
+      libgraphite2.so* \
+      libintl.so*; do \
+    find /usr/lib -name "$lib" -exec cp {} /libs/ \; 2>/dev/null || true; \
+    done
 
-# Download ffmpeg static binary
-RUN curl -L -o /tmp/ffmpeg.tar.xz https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz && \
-    tar -xJf /tmp/ffmpeg.tar.xz -C /tmp/ && \
-    cp /tmp/ffmpeg-*-static/ffmpeg /toolbox/ && \
-    cp /tmp/ffmpeg-*-static/ffprobe /toolbox/ && \
-    rm -rf /tmp/ffmpeg-*-static /tmp/ffmpeg.tar.xz && \
-    /toolbox/ffmpeg -version | head -1
+# Python stdlib - minimal copy
+RUN PYVER=$(python3 -c "import sys;print(f'{sys.version_info.major}.{sys.version_info.minor}')") && \
+    mkdir -p /pylib && \
+    cp -r /usr/lib/python${PYVER} /pylib/ && \
+    echo "$PYVER" > /pylib/version.txt && \
+    find /pylib -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true && \
+    find /pylib -name "*.pyc" -delete 2>/dev/null || true && \
+    find /pylib -type d -name "test*" -exec rm -rf {} + 2>/dev/null || true && \
+    find /pylib -type d -name "idle*" -exec rm -rf {} + 2>/dev/null || true && \
+    find /pylib -type d -name "tkinter" -exec rm -rf {} + 2>/dev/null || true && \
+    find /pylib -type d -name "turtle*" -exec rm -rf {} + 2>/dev/null || true
+
+# Minimal fonts - only Arabic + fallback
+RUN mkdir -p /fonts && \
+    cp -r /usr/share/fonts/noto /fonts/ 2>/dev/null || true && \
+    cp -r /usr/share/fonts/dejavu /fonts/ 2>/dev/null || true && \
+    fc-cache -f 2>/dev/null || true
 
 # ─────────────────────────────────────────────────────────────
-# Stage 2: Final n8n image
+# Stage 2: Final optimized n8n image
 # ─────────────────────────────────────────────────────────────
 FROM docker.n8n.io/n8nio/n8n:2.6.2
 
 USER root
 
-# Copy binaries from tools
-COPY --from=tools /toolbox/        /usr/local/bin/
+# Copy binaries
+COPY --from=tools /toolbox/ffmpeg     /usr/local/bin/
+COPY --from=tools /toolbox/ffprobe    /usr/local/bin/
+COPY --from=tools /toolbox/python3    /usr/local/bin/
+COPY --from=tools /toolbox/fc-cache   /usr/local/bin/
+COPY --from=tools /toolbox/fc-list    /usr/local/bin/
 
-# Copy ALL libs from Alpine builder
-COPY --from=tools /usr/lib/        /usr/local/lib/
-COPY --from=tools /lib/            /usr/local/lib2/
+# Copy only required libs
+COPY --from=tools /libs/              /usr/local/lib/
 
-# Copy Python stdlib
-COPY --from=tools /pylib/          /usr/lib/python-alpine/
+# Copy minimal Python stdlib
+COPY --from=tools /pylib/             /usr/lib/pylib/
 
 # Copy fonts
-COPY --from=tools /usr/share/fonts/      /usr/share/fonts/
-COPY --from=tools /etc/fonts/            /etc/fonts/
+COPY --from=tools /fonts/             /usr/share/fonts/
+COPY --from=tools /etc/fonts/         /etc/fonts/
 COPY --from=tools /var/cache/fontconfig/ /var/cache/fontconfig/
 
-# Copy SSL certs
-COPY --from=tools /etc/ssl/certs/  /etc/ssl/certs/
+# All ENV in one layer
+ENV LD_LIBRARY_PATH="/usr/local/lib:/usr/lib" \
+    PATH="/usr/local/bin:$PATH" \
+    FFMPEG_PATH="/usr/local/bin/ffmpeg" \
+    FFPROBE_PATH="/usr/local/bin/ffprobe" \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
 
-# Environment variables
-ENV LD_LIBRARY_PATH="/usr/local/lib:/usr/local/lib2:/usr/lib:$LD_LIBRARY_PATH"
-ENV PATH="/usr/local/bin:$PATH"
-ENV FFMPEG_PATH="/usr/local/bin/ffmpeg"
-ENV FFPROBE_PATH="/usr/local/bin/ffprobe"
-ENV FFREPORT="file=/tmp/ffreport-%p-%t.log:level=32"
-ENV PYTHONPATH="/usr/lib/python3.12:/usr/lib/python3.12/lib-dynload"
-
-# Setup Python symlinks and PYTHONPATH
-RUN PYVER=$(cat /usr/lib/python-alpine/version.txt) && \
-    echo "Setting up Python ${PYVER}" && \
-    PYDIR="/usr/lib/python-alpine/python${PYVER}" && \
-    ln -sf "$PYDIR" "/usr/lib/python${PYVER}" && \
-    printf 'export PYTHONPATH=/usr/lib/python%s:/usr/lib/python%s/lib-dynload\n' \
-      "${PYVER}" "${PYVER}" >> /etc/profile && \
-    printf 'export PYTHONPATH=/usr/lib/python%s:/usr/lib/python%s/lib-dynload\n' \
-      "${PYVER}" "${PYVER}" >> /root/.profile && \
-    echo "Python stdlib linked at /usr/lib/python${PYVER}"
-
-# Create runtime directories
-RUN mkdir -p /tmp/ffmpeg-temp /tmp/ffmpeg-cache /var/log/ffmpeg && \
-    chmod 1777 /tmp/ffmpeg-temp /tmp/ffmpeg-cache /tmp && \
-    chmod 755 /var/log/ffmpeg
-
-# Make binaries executable and verify
-RUN chmod +x /usr/local/bin/ffmpeg /usr/local/bin/ffprobe && \
-    /usr/local/bin/ffmpeg  -version | head -1 && \
-    /usr/local/bin/ffprobe -version | head -1
-
-# Create symlinks for ffmpeg
-RUN ln -sf /usr/local/bin/ffmpeg  /usr/bin/ffmpeg  && \
+# Setup everything in ONE RUN command for minimal layers
+RUN PYVER=$(cat /usr/lib/pylib/version.txt) && \
+    \
+    # Python setup
+    ln -sf /usr/lib/pylib/python${PYVER} /usr/lib/python${PYVER} && \
+    echo "export PYTHONPATH=/usr/lib/python${PYVER}" >> /etc/profile && \
+    \
+    # Symlinks for binaries
+    ln -sf /usr/local/bin/ffmpeg /usr/bin/ffmpeg && \
     ln -sf /usr/local/bin/ffprobe /usr/bin/ffprobe && \
-    ln -sf /usr/local/bin/ffmpeg  /bin/ffmpeg      && \
-    ln -sf /usr/local/bin/ffprobe /bin/ffprobe
-
-# Create symlinks for Python and bash
-RUN ln -sf /usr/local/bin/python3 /usr/bin/python3 2>/dev/null || true && \
-    ln -sf /usr/local/bin/python3 /usr/bin/python  2>/dev/null || true && \
-    ln -sf /usr/local/bin/python3 /bin/python3     2>/dev/null || true && \
-    ln -sf /usr/local/bin/python3 /bin/python      2>/dev/null || true && \
-    ln -sf /usr/local/bin/bash    /bin/bash        2>/dev/null || true
-
-# Verify Python works
-RUN PYVER=$(cat /usr/lib/python-alpine/version.txt) && \
-    PYTHONPATH="/usr/lib/python${PYVER}:/usr/lib/python${PYVER}/lib-dynload" \
-    /usr/local/bin/python3 --version && \
-    PYTHONPATH="/usr/lib/python${PYVER}:/usr/lib/python${PYVER}/lib-dynload" \
-    /usr/local/bin/python3 -c "print('Python3 OK')"
-
-# Rebuild font cache
-RUN fc-cache -fv 2>/dev/null || true
-
-# Create app directories
-RUN mkdir -p /scripts /backup-data /home/node/.n8n && \
+    ln -sf /usr/local/bin/python3 /usr/bin/python3 && \
+    ln -sf /usr/local/bin/python3 /usr/bin/python && \
+    \
+    # Directories
+    mkdir -p /scripts /backup-data /home/node/.n8n && \
     chown -R node:node /home/node/.n8n /scripts /backup-data && \
-    chown -R node:node /tmp/ffmpeg-temp /tmp/ffmpeg-cache /var/log/ffmpeg
+    \
+    # Font cache
+    fc-cache -f 2>/dev/null || true && \
+    \
+    # Make executable
+    chmod +x /usr/local/bin/*
 
-# Install n8n community nodes as node user
+# Set PYTHONPATH dynamically
+RUN PYVER=$(cat /usr/lib/pylib/version.txt) && \
+    echo "PYTHONPATH=/usr/lib/python${PYVER}" >> /etc/environment
+
+ENV PYTHONPATH="/usr/lib/python3.12"
+
+# Install n8n nodes
 USER node
-
 RUN cd /home/node/.n8n && \
-    mkdir -p nodes && \
-    cd nodes && \
+    mkdir -p nodes && cd nodes && \
     npm init -y 2>/dev/null && \
-    npm install @mookielianhd/n8n-nodes-instagram 2>/dev/null || true
+    npm install --prefer-offline --no-audit --no-fund @mookielianhd/n8n-nodes-instagram 2>/dev/null || true
 
 USER root
 
 # Copy scripts
 COPY --chown=node:node scripts/ /scripts/
+RUN sed -i 's/\r$//' /scripts/*.sh 2>/dev/null || true && \
+    chmod 0755 /scripts/*.sh 2>/dev/null || true
 
-RUN sed -i 's/\r$//' /scripts/*.sh && \
-    chmod 0755 /scripts/*.sh
-
-# Final verification as node user
+# Quick verification
 USER node
-
-RUN ffmpeg  -version | head -1 && \
+RUN ffmpeg -version | head -1 && \
     ffprobe -version | head -1 && \
-    echo "FFmpeg OK" && \
-    PYVER=$(cat /usr/lib/python-alpine/version.txt) && \
-    PYTHONPATH="/usr/lib/python${PYVER}:/usr/lib/python${PYVER}/lib-dynload" \
-    /usr/local/bin/python3 --version && \
-    PYTHONPATH="/usr/lib/python${PYVER}:/usr/lib/python${PYVER}/lib-dynload" \
-    /usr/local/bin/python3 -c "t='d8a8d8b3d985d984d984d987';r=bytes.fromhex(t).decode('utf-8');print('Arabic OK:',r)" && \
-    echo "aGVsbG8=" | base64 -d && echo "" && \
-    fc-list :lang=ar 2>/dev/null | head -5 || echo "Arabic fonts check done" && \
-    echo "===============================" && \
-    echo "ALL DEPENDENCIES VERIFIED OK" && \
-    echo "==============================="
+    PYVER=$(cat /usr/lib/pylib/version.txt) && \
+    PYTHONPATH="/usr/lib/python${PYVER}" python3 -c "print('OK')" && \
+    echo "BUILD OK"
 
 WORKDIR /home/node
-
 ENTRYPOINT ["sh", "/scripts/start.sh"]
