@@ -16,7 +16,6 @@ RUN apk add --no-cache \
         [ -f "$p" ] && cp "$p" /toolbox/ || true; \
     done
 
-# Download static ffmpeg build
 RUN curl -L -o /tmp/ffmpeg.tar.xz \
       https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz && \
     tar -xJf /tmp/ffmpeg.tar.xz -C /tmp/ && \
@@ -31,7 +30,6 @@ FROM docker.n8n.io/n8nio/n8n:2.6.2
 
 USER root
 
-# Copy static binaries from toolbox stage
 COPY --from=tools /toolbox/       /usr/local/bin/
 COPY --from=tools /usr/lib/       /usr/local/lib/
 COPY --from=tools /lib/           /usr/local/lib2/
@@ -40,53 +38,46 @@ COPY --from=tools /etc/ssl/certs/ /etc/ssl/certs/
 ENV LD_LIBRARY_PATH="/usr/local/lib:/usr/local/lib2:${LD_LIBRARY_PATH}"
 ENV PATH="/usr/local/bin:${PATH}"
 
-# FFmpeg environment variables
 ENV FFMPEG_PATH="/usr/local/bin/ffmpeg"
 ENV FFPROBE_PATH="/usr/local/bin/ffprobe"
 ENV FFREPORT="file=/tmp/ffreport-%p-%t.log:level=32"
 
-# Make sure ffmpeg binaries are executable
-RUN chmod +x /usr/local/bin/ffmpeg /usr/local/bin/ffprobe
-
-# Create symlinks so every possible lookup path works
-RUN ln -sf /usr/local/bin/ffmpeg  /usr/bin/ffmpeg  && \
+RUN chmod +x /usr/local/bin/ffmpeg /usr/local/bin/ffprobe && \
+    ln -sf /usr/local/bin/ffmpeg  /usr/bin/ffmpeg  && \
     ln -sf /usr/local/bin/ffprobe /usr/bin/ffprobe && \
     ln -sf /usr/local/bin/ffmpeg  /bin/ffmpeg      && \
     ln -sf /usr/local/bin/ffprobe /bin/ffprobe
 
-# FFmpeg runtime temp directories
 RUN mkdir -p /tmp/ffmpeg-temp /tmp/ffmpeg-cache /var/log/ffmpeg && \
     chmod 1777 /tmp/ffmpeg-temp /tmp/ffmpeg-cache /tmp           && \
     chmod 755  /var/log/ffmpeg
 
-# Quick sanity-check (runs as root during build)
-RUN /usr/local/bin/ffmpeg -version && \
-    /usr/local/bin/ffprobe -version
+RUN /usr/local/bin/ffmpeg -version && /usr/local/bin/ffprobe -version
 
 # ============================================================
-# Fonts: Arabic + Emoji support
+# KEY FIX for "Connection Lost":
+# - N8N_DEFAULT_BINARY_DATA_MODE=filesystem  → videos stored on disk, not RAM
+# - EXECUTIONS_TIMEOUT=7200                  → 2-hour timeout (was too short)
+# - NODE_OPTIONS max-old-space-size=2048     → Node.js gets 2GB heap
+# ============================================================
+ENV EXECUTIONS_TIMEOUT=7200                  \
+    EXECUTIONS_TIMEOUT_MAX=7200              \
+    N8N_DEFAULT_BINARY_DATA_MODE=filesystem  \
+    N8N_BINARY_DATA_STORAGE_PATH=/home/node/.n8n/binaryData \
+    N8N_EXECUTION_TIMEOUT=7200               \
+    NODE_OPTIONS="--max-old-space-size=2048"
+
+# ============================================================
+# Fonts: Arabic + Emoji
 # ============================================================
 RUN apk add --no-cache \
-      fontconfig  \
-      ttf-dejavu  \
-      font-noto   \
-      font-noto-arabic \
-      font-noto-extra  \
-      font-noto-emoji  \
-      font-freefont    \
-      libass   \
-      fribidi  \
-      harfbuzz \
-      freetype \
-      libstdc++ \
-      libgcc    \
-      libgomp   \
-      zlib      \
-      expat     \
+      fontconfig ttf-dejavu font-noto font-noto-arabic \
+      font-noto-extra font-noto-emoji font-freefont \
+      libass fribidi harfbuzz freetype \
+      libstdc++ libgcc libgomp zlib expat \
       curl unzip \
     2>/dev/null || true
 
-# Download Amiri (best classical Arabic font) and Noto Color Emoji
 RUN mkdir -p /usr/share/fonts/amiri /usr/share/fonts/noto-emoji && \
     curl -fsSL \
       "https://github.com/aliftype/amiri/releases/download/1.000/Amiri-1.000.zip" \
@@ -98,7 +89,6 @@ RUN mkdir -p /usr/share/fonts/amiri /usr/share/fonts/noto-emoji && \
       "https://github.com/googlefonts/noto-emoji/raw/main/fonts/NotoColorEmoji.ttf" \
       -o /usr/share/fonts/noto-emoji/NotoColorEmoji.ttf 2>/dev/null || true
 
-# fontconfig: Arabic and Emoji priority
 RUN mkdir -p /etc/fonts/conf.d && \
     cat > /etc/fonts/conf.d/10-arabic-emoji.conf <<'EOF'
 <?xml version="1.0"?>
@@ -107,27 +97,22 @@ RUN mkdir -p /etc/fonts/conf.d && \
   <alias>
     <family>serif</family>
     <prefer>
-      <family>Amiri</family>
-      <family>Noto Naskh Arabic</family>
-      <family>Noto Serif Arabic</family>
-      <family>FreeSerif</family>
+      <family>Amiri</family><family>Noto Naskh Arabic</family>
+      <family>Noto Serif Arabic</family><family>FreeSerif</family>
       <family>DejaVu Serif</family>
     </prefer>
   </alias>
   <alias>
     <family>sans-serif</family>
     <prefer>
-      <family>Noto Sans Arabic</family>
-      <family>Noto Kufi Arabic</family>
-      <family>FreeSans</family>
-      <family>DejaVu Sans</family>
+      <family>Noto Sans Arabic</family><family>Noto Kufi Arabic</family>
+      <family>FreeSans</family><family>DejaVu Sans</family>
     </prefer>
   </alias>
   <alias>
     <family>emoji</family>
     <prefer>
-      <family>Noto Color Emoji</family>
-      <family>Noto Emoji</family>
+      <family>Noto Color Emoji</family><family>Noto Emoji</family>
     </prefer>
   </alias>
   <match target="font">
@@ -141,27 +126,22 @@ RUN mkdir -p /etc/fonts/conf.d && \
 </fontconfig>
 EOF
 
-# Rebuild font cache and verify Arabic fonts are present
 RUN fc-cache -fv 2>/dev/null || true && \
-    echo "=== Arabic fonts ===" && fc-list :lang=ar | sort && \
-    echo "=== Emoji fonts ===="  && fc-list :lang=und-zsye 2>/dev/null | sort || true
+    echo "=== Arabic ===" && fc-list :lang=ar | sort && \
+    echo "=== Emoji ===" && fc-list :lang=und-zsye 2>/dev/null | sort || true
 
-# Locale / encoding
-ENV LANG="en_US.UTF-8"      \
-    LC_ALL="en_US.UTF-8"    \
+ENV LANG="en_US.UTF-8"          \
+    LC_ALL="en_US.UTF-8"        \
     FONTCONFIG_PATH="/etc/fonts" \
     FONTCONFIG_FILE="/etc/fonts/fonts.conf"
 
 # ============================================================
-# Workspace directories
+# Workspace
 # ============================================================
-RUN mkdir -p /scripts /backup-data /home/node/.n8n    && \
+RUN mkdir -p /scripts /backup-data /home/node/.n8n /home/node/.n8n/binaryData && \
     chown -R node:node /home/node/.n8n /scripts /backup-data && \
     chown -R node:node /tmp/ffmpeg-temp /tmp/ffmpeg-cache /var/log/ffmpeg
 
-# ============================================================
-# Install custom n8n community nodes
-# ============================================================
 USER node
 
 RUN cd /home/node/.n8n && \
@@ -171,23 +151,16 @@ RUN cd /home/node/.n8n && \
 
 USER root
 
-# ============================================================
-# Startup scripts
-# ============================================================
 COPY --chown=node:node scripts/ /scripts/
 
-# Strip Windows line-endings and make executable
 RUN sed -i 's/\r$//' /scripts/*.sh && \
     chmod 0755 /scripts/*.sh
 
-# ============================================================
-# Final verification as node user
-# ============================================================
 USER node
 
 RUN ffmpeg -version && ffprobe -version && \
     fc-list :lang=ar 2>/dev/null | head -5 || echo "Arabic fonts check done" && \
-    echo "FFmpeg + fonts verified successfully"
+    echo "All verified OK"
 
 WORKDIR /home/node
 
