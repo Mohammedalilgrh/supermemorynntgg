@@ -1,4 +1,8 @@
+# ============================================================
+# Stage 1: Build toolbox (static binaries + ffmpeg)
+# ============================================================
 FROM alpine:3.20 AS tools
+
 RUN apk add --no-cache \
       curl jq sqlite tar gzip xz \
       coreutils findutils ca-certificates && \
@@ -11,70 +15,92 @@ RUN apk add --no-cache \
       p="$(which $cmd 2>/dev/null)" && \
         [ -f "$p" ] && cp "$p" /toolbox/ || true; \
     done
-# تحميل ffmpeg static في مرحلة Alpine
-RUN curl -L -o /tmp/ffmpeg.tar.xz https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz && \
+
+# Download static ffmpeg build
+RUN curl -L -o /tmp/ffmpeg.tar.xz \
+      https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz && \
     tar -xJf /tmp/ffmpeg.tar.xz -C /tmp/ && \
-    cp /tmp/ffmpeg-*-static/ffmpeg /toolbox/ && \
+    cp /tmp/ffmpeg-*-static/ffmpeg  /toolbox/ && \
     cp /tmp/ffmpeg-*-static/ffprobe /toolbox/ && \
     rm -rf /tmp/ffmpeg-*-static /tmp/ffmpeg.tar.xz
+
+# ============================================================
+# Stage 2: Final image based on n8n
+# ============================================================
 FROM docker.n8n.io/n8nio/n8n:2.6.2
+
 USER root
-COPY --from=tools /toolbox/        /usr/local/bin/
-COPY --from=tools /usr/lib/        /usr/local/lib/
-COPY --from=tools /lib/            /usr/local/lib2/
-COPY --from=tools /etc/ssl/certs/  /etc/ssl/certs/
-ENV LD_LIBRARY_PATH="/usr/local/lib:/usr/local/lib2:$LD_LIBRARY_PATH"
-ENV PATH="/usr/local/bin:$PATH"
-# FFmpeg environment variables for full compatibility
+
+# Copy static binaries from toolbox stage
+COPY --from=tools /toolbox/       /usr/local/bin/
+COPY --from=tools /usr/lib/       /usr/local/lib/
+COPY --from=tools /lib/           /usr/local/lib2/
+COPY --from=tools /etc/ssl/certs/ /etc/ssl/certs/
+
+ENV LD_LIBRARY_PATH="/usr/local/lib:/usr/local/lib2:${LD_LIBRARY_PATH}"
+ENV PATH="/usr/local/bin:${PATH}"
+
+# FFmpeg environment variables
 ENV FFMPEG_PATH="/usr/local/bin/ffmpeg"
 ENV FFPROBE_PATH="/usr/local/bin/ffprobe"
 ENV FFREPORT="file=/tmp/ffreport-%p-%t.log:level=32"
-# FFmpeg runtime directories
-RUN mkdir -p /tmp/ffmpeg-temp /tmp/ffmpeg-cache /var/log/ffmpeg && \
-    chmod 1777 /tmp/ffmpeg-temp /tmp/ffmpeg-cache /tmp && \
-    chmod 755 /var/log/ffmpeg
-# Verify ffmpeg binaries are executable and working
-RUN chmod +x /usr/local/bin/ffmpeg /usr/local/bin/ffprobe && \
-    /usr/local/bin/ffmpeg -version && \
-    /usr/local/bin/ffprobe -version
-# Create symlinks for common paths where n8n nodes might look for ffmpeg
-RUN ln -sf /usr/local/bin/ffmpeg /usr/bin/ffmpeg && \
+
+# Make sure ffmpeg binaries are executable
+RUN chmod +x /usr/local/bin/ffmpeg /usr/local/bin/ffprobe
+
+# Create symlinks so every possible lookup path works
+RUN ln -sf /usr/local/bin/ffmpeg  /usr/bin/ffmpeg  && \
     ln -sf /usr/local/bin/ffprobe /usr/bin/ffprobe && \
-    ln -sf /usr/local/bin/ffmpeg /bin/ffmpeg && \
+    ln -sf /usr/local/bin/ffmpeg  /bin/ffmpeg      && \
     ln -sf /usr/local/bin/ffprobe /bin/ffprobe
-# ===== الخطوط والـ fontconfig مع دعم كامل للعربية والإيموجي =====
+
+# FFmpeg runtime temp directories
+RUN mkdir -p /tmp/ffmpeg-temp /tmp/ffmpeg-cache /var/log/ffmpeg && \
+    chmod 1777 /tmp/ffmpeg-temp /tmp/ffmpeg-cache /tmp           && \
+    chmod 755  /var/log/ffmpeg
+
+# Quick sanity-check (runs as root during build)
+RUN /usr/local/bin/ffmpeg -version && \
+    /usr/local/bin/ffprobe -version
+
+# ============================================================
+# Fonts: Arabic + Emoji support
+# ============================================================
 RUN apk add --no-cache \
-    fontconfig \
-    ttf-dejavu \
-    font-noto \
-    font-noto-arabic \
-    font-noto-extra \
-    font-noto-emoji \
-    font-freefont \
-    libass \
-    fribidi \
-    harfbuzz \
-    freetype \
-    libstdc++ \
-    libgcc \
-    libgomp \
-    zlib \
-    expat \
+      fontconfig  \
+      ttf-dejavu  \
+      font-noto   \
+      font-noto-arabic \
+      font-noto-extra  \
+      font-noto-emoji  \
+      font-freefont    \
+      libass   \
+      fribidi  \
+      harfbuzz \
+      freetype \
+      libstdc++ \
+      libgcc    \
+      libgomp   \
+      zlib      \
+      expat     \
+      curl unzip \
     2>/dev/null || true
 
-# تحميل خط Amiri (أفضل خط عربي للنصوص الكلاسيكية) وNoto Color Emoji
-RUN apk add --no-cache curl unzip 2>/dev/null || true && \
-    mkdir -p /usr/share/fonts/amiri /usr/share/fonts/noto-emoji && \
-    curl -fsSL "https://github.com/aliftype/amiri/releases/download/1.000/Amiri-1.000.zip" \
+# Download Amiri (best classical Arabic font) and Noto Color Emoji
+RUN mkdir -p /usr/share/fonts/amiri /usr/share/fonts/noto-emoji && \
+    curl -fsSL \
+      "https://github.com/aliftype/amiri/releases/download/1.000/Amiri-1.000.zip" \
       -o /tmp/amiri.zip 2>/dev/null && \
     unzip -q /tmp/amiri.zip -d /tmp/amiri 2>/dev/null && \
     find /tmp/amiri -name "*.ttf" -exec cp {} /usr/share/fonts/amiri/ \; && \
     rm -rf /tmp/amiri /tmp/amiri.zip && \
-    curl -fsSL "https://github.com/googlefonts/noto-emoji/raw/main/fonts/NotoColorEmoji.ttf" \
+    curl -fsSL \
+      "https://github.com/googlefonts/noto-emoji/raw/main/fonts/NotoColorEmoji.ttf" \
       -o /usr/share/fonts/noto-emoji/NotoColorEmoji.ttf 2>/dev/null || true
 
-# إعداد fontconfig مع أولوية للعربية والإيموجي
-RUN mkdir -p /etc/fonts/conf.d && cat > /etc/fonts/conf.d/10-arabic-emoji.conf <<'EOF'
+# fontconfig: Arabic and Emoji priority
+RUN mkdir -p /etc/fonts/conf.d && \
+    cat > /etc/fonts/conf.d/10-arabic-emoji.conf <<'EOF'
 <?xml version="1.0"?>
 <!DOCTYPE fontconfig SYSTEM "fonts.dtd">
 <fontconfig>
@@ -115,35 +141,54 @@ RUN mkdir -p /etc/fonts/conf.d && cat > /etc/fonts/conf.d/10-arabic-emoji.conf <
 </fontconfig>
 EOF
 
-# متغيرات البيئة للغة والترميز
-ENV LANG="en_US.UTF-8" \
-    LC_ALL="en_US.UTF-8" \
+# Rebuild font cache and verify Arabic fonts are present
+RUN fc-cache -fv 2>/dev/null || true && \
+    echo "=== Arabic fonts ===" && fc-list :lang=ar | sort && \
+    echo "=== Emoji fonts ===="  && fc-list :lang=und-zsye 2>/dev/null | sort || true
+
+# Locale / encoding
+ENV LANG="en_US.UTF-8"      \
+    LC_ALL="en_US.UTF-8"    \
     FONTCONFIG_PATH="/etc/fonts" \
     FONTCONFIG_FILE="/etc/fonts/fonts.conf"
 
-# تحديث cache الخطوط
-RUN fc-cache -fv 2>/dev/null || true && \
-    echo "=== Arabic fonts ===" && fc-list :lang=ar | sort && \
-    echo "=== Emoji fonts ===" && fc-list :lang=und-zsye 2>/dev/null | sort || true
+# ============================================================
+# Workspace directories
+# ============================================================
+RUN mkdir -p /scripts /backup-data /home/node/.n8n    && \
+    chown -R node:node /home/node/.n8n /scripts /backup-data && \
+    chown -R node:node /tmp/ffmpeg-temp /tmp/ffmpeg-cache /var/log/ffmpeg
 
-RUN mkdir -p /scripts /backup-data /home/node/.n8n && \
-    chown -R node:node /home/node/.n8n /scripts /backup-data
-# Ensure node user has access to ffmpeg temp directories
-RUN chown -R node:node /tmp/ffmpeg-temp /tmp/ffmpeg-cache /var/log/ffmpeg
+# ============================================================
+# Install custom n8n community nodes
+# ============================================================
 USER node
+
 RUN cd /home/node/.n8n && \
-    mkdir -p nodes && \
-    cd nodes && \
+    mkdir -p nodes && cd nodes && \
     npm init -y 2>/dev/null && \
     npm install @mookielianhd/n8n-nodes-instagram 2>/dev/null || true
+
 USER root
+
+# ============================================================
+# Startup scripts
+# ============================================================
 COPY --chown=node:node scripts/ /scripts/
+
+# Strip Windows line-endings and make executable
 RUN sed -i 's/\r$//' /scripts/*.sh && \
     chmod 0755 /scripts/*.sh
-# Final verification that ffmpeg works for node user
+
+# ============================================================
+# Final verification as node user
+# ============================================================
 USER node
+
 RUN ffmpeg -version && ffprobe -version && \
     fc-list :lang=ar 2>/dev/null | head -5 || echo "Arabic fonts check done" && \
-    echo "FFmpeg installation verified successfully"
+    echo "FFmpeg + fonts verified successfully"
+
 WORKDIR /home/node
+
 ENTRYPOINT ["sh", "/scripts/start.sh"]
