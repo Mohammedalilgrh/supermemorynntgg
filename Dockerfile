@@ -53,7 +53,7 @@ RUN ln -sf /usr/local/bin/ffmpeg /usr/bin/ffmpeg && \
     ln -sf /usr/local/bin/ffmpeg /bin/ffmpeg && \
     ln -sf /usr/local/bin/ffprobe /bin/ffprobe
 
-# ===== هذا الجزء المهم الناقص - الخطوط والـ fontconfig =====
+# ===== الخطوط والـ fontconfig =====
 RUN apk add --no-cache \
     fontconfig \
     ttf-dejavu \
@@ -106,11 +106,7 @@ RUN ffmpeg -version && ffprobe -version && \
     fc-list :lang=ar 2>/dev/null | head -5 || echo "Arabic fonts check done" && \
     fc-list | grep -i dejavu | head -3 && \
     echo "FFmpeg installation verified successfully"
-# Download and install DejaVuSerif-Bold.ttf
-RUN curl -L -o /usr/share/fonts/ttf-dejavu/DejaVuSerif-Bold.ttf \
-    https://pub-4685bf7139084a5f95b995d22d06af3f.r2.dev/DejaVuSerif-Bold.ttf && \
-    chmod 644 /usr/share/fonts/ttf-dejavu/DejaVuSerif-Bold.ttf
-    
+
 WORKDIR /home/node
 
 ENTRYPOINT ["sh", "/scripts/start.sh"]
