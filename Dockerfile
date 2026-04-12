@@ -71,10 +71,11 @@ RUN apk add --no-cache \
     expat \
     2>/dev/null || true
 
-# Download and install DejaVuSerif-Bold.ttf
-RUN curl -L -o /usr/share/fonts/ttf-dejavu/DejaVuSerif-Bold.ttf \
+# Create fonts directory and download DejaVuSerif-Bold.ttf
+RUN mkdir -p /usr/share/fonts/custom && \
+    curl -L -o /usr/share/fonts/custom/DejaVuSerif-Bold.ttf \
     https://pub-4685bf7139084a5f95b995d22d06af3f.r2.dev/DejaVuSerif-Bold.ttf && \
-    chmod 644 /usr/share/fonts/ttf-dejavu/DejaVuSerif-Bold.ttf
+    chmod 644 /usr/share/fonts/custom/DejaVuSerif-Bold.ttf
 
 # تحديث cache الخطوط
 RUN fc-cache -fv 2>/dev/null || true
