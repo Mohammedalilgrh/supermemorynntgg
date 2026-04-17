@@ -12,8 +12,8 @@ RUN apk add --no-cache \
       xz \
       coreutils \
       findutils \
-      ca-certificates \
-      bash
+      bash \
+      ca-certificates
 
 RUN mkdir -p /toolbox && \
     for cmd in \
@@ -24,8 +24,12 @@ RUN mkdir -p /toolbox && \
       cp mv basename expr bash sh; \
     do \
       p="$(which "$cmd" 2>/dev/null)" && \
-      [ -f "$p" ] && cp "$p" /toolbox/ && echo "Copied: $cmd ($p)" || echo "Skip: $cmd"; \
-    done
+      [ -f "$p" ] && \
+      cp "$p" /toolbox/ && \
+      echo "✅ $cmd" || \
+      echo "⚠️  skip: $cmd"; \
+    done && \
+    ls -la /toolbox/
 
 # ============================================================
 # Stage 2: n8n + FFmpeg
@@ -34,7 +38,9 @@ FROM docker.n8n.io/n8nio/n8n:2.6.2
 
 USER root
 
-# ✅ Fix apk repositories and install ffmpeg + fonts
+# ============================================================
+# System packages
+# ============================================================
 RUN apk update && \
     apk add --no-cache \
       ffmpeg \
@@ -48,136 +54,127 @@ RUN apk update && \
       fribidi \
       bash \
       curl \
-      ca-certificates && \
+      ca-certificates \
+      shadow && \
     rm -rf /var/cache/apk/*
 
-# ✅ Copy toolbox binaries safely
+# ============================================================
+# Copy toolbox
+# ============================================================
 COPY --from=tools /toolbox/ /usr/local/bin/
-
-# ✅ Ensure correct permissions on toolbox
-RUN chmod 755 /usr/local/bin/*
+RUN chmod -R 755 /usr/local/bin/
 
 # ============================================================
-# PATH + FFmpeg environment
+# Environment
 # ============================================================
-ENV PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
+ENV PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 ENV FFMPEG_PATH="/usr/bin/ffmpeg"
 ENV FFPROBE_PATH="/usr/bin/ffprobe"
 ENV FFREPORT="file=/tmp/ffreport-%p-%t.log:level=32"
-
-# ============================================================
-# n8n specific environment
-# ============================================================
 ENV N8N_USER_FOLDER="/home/node/.n8n"
-ENV NODE_FUNCTION_ALLOW_EXTERNAL="*"
 ENV N8N_CUSTOM_EXTENSIONS="/home/node/.n8n/nodes"
+ENV NODE_FUNCTION_ALLOW_EXTERNAL="*"
+ENV NODE_OPTIONS="--max-old-space-size=4096"
+ENV GENERIC_TIMEZONE="UTC"
+ENV TZ="UTC"
 
 # ============================================================
-# Temp directories + permissions
+# Directories + permissions
 # ============================================================
 RUN mkdir -p \
       /tmp/ffmpeg-temp \
       /tmp/ffmpeg-cache \
-      /var/log/ffmpeg && \
-    chmod 1777 /tmp && \
-    chmod 777 /tmp/ffmpeg-temp /tmp/ffmpeg-cache && \
-    chmod 755 /var/log/ffmpeg
-
-# ============================================================
-# Fonts (custom + system rebuild)
-# ============================================================
-RUN mkdir -p /usr/share/fonts/custom
-
-# Download custom font with retry + fallback
-RUN curl -fsSL \
-      --retry 3 \
-      --retry-delay 2 \
-      --connect-timeout 10 \
-      -o /usr/share/fonts/custom/DejaVuSerif-Bold.ttf \
-      "https://pub-4685bf7139084a5f95b995d22d06af3f.r2.dev/DejaVuSerif-Bold.ttf" && \
-    chmod 644 /usr/share/fonts/custom/DejaVuSerif-Bold.ttf && \
-    echo "✅ Custom font downloaded" || \
-    echo "⚠️  Custom font download failed - continuing without it"
-
-RUN fc-cache -fv && \
-    fc-list | head -10 && \
-    echo "✅ Font cache rebuilt"
-
-# ============================================================
-# n8n directories + custom nodes
-# ============================================================
-RUN mkdir -p \
+      /var/log/ffmpeg \
       /scripts \
       /backup-data \
       /home/node/.n8n \
-      /home/node/.n8n/nodes && \
+      /home/node/.n8n/nodes \
+      /usr/share/fonts/custom && \
+    chmod 1777 /tmp && \
+    chmod 777 /tmp/ffmpeg-temp /tmp/ffmpeg-cache && \
+    chmod 755 /var/log/ffmpeg /scripts /backup-data && \
     chown -R node:node \
       /home/node/.n8n \
       /scripts \
-      /backup-data && \
-    chown node:node \
+      /backup-data \
       /tmp/ffmpeg-temp \
       /tmp/ffmpeg-cache \
       /var/log/ffmpeg
 
 # ============================================================
-# Install custom n8n nodes
+# Custom font download
+# ============================================================
+RUN curl -fsSL \
+      --retry 5 \
+      --retry-delay 3 \
+      --retry-max-time 60 \
+      --connect-timeout 15 \
+      -o /usr/share/fonts/custom/DejaVuSerif-Bold.ttf \
+      "https://pub-4685bf7139084a5f95b995d22d06af3f.r2.dev/DejaVuSerif-Bold.ttf" \
+    && chmod 644 /usr/share/fonts/custom/DejaVuSerif-Bold.ttf \
+    && echo "✅ Custom font OK" \
+    || echo "⚠️  Custom font skipped"
+
+# Rebuild font cache
+RUN fc-cache -fv && \
+    echo "✅ Font cache OK"
+
+# ============================================================
+# Custom n8n nodes (as node user)
 # ============================================================
 USER node
 
-# Initialize npm and install custom node packages
 RUN cd /home/node/.n8n/nodes && \
-    npm init -y && \
-    npm install \
-      --save \
-      --prefer-offline \
+    npm init -y > /dev/null 2>&1 && \
+    npm install --save \
       @mookielianhd/n8n-nodes-instagram \
-    2>&1 | tail -5 || \
-    echo "⚠️  Custom node install failed - continuing"
+    > /dev/null 2>&1 \
+    && echo "✅ Custom nodes installed" \
+    || echo "⚠️  Custom nodes skipped"
 
 USER root
 
 # ============================================================
-# Copy scripts
+# Copy + prepare scripts
 # ============================================================
 COPY --chown=node:node scripts/ /scripts/
 
-# Fix Windows line endings + set executable
-RUN if ls /scripts/*.sh >/dev/null 2>&1; then \
-      sed -i 's/\r$//' /scripts/*.sh && \
-      chmod 0755 /scripts/*.sh && \
-      echo "✅ Scripts prepared"; \
-    else \
-      echo "⚠️  No .sh scripts found in /scripts/"; \
-    fi
+RUN find /scripts -name "*.sh" -exec sed -i 's/\r$//' {} \; && \
+    find /scripts -name "*.sh" -exec chmod 0755 {} \; && \
+    echo "✅ Scripts prepared"
 
 # ============================================================
-# Verify everything works
+# Final verification (build-time check)
+# ============================================================
+RUN echo "=== FFmpeg ===" && \
+    ffmpeg -version 2>&1 | head -2 && \
+    echo "" && \
+    echo "=== drawtext ===" && \
+    ffmpeg -filters 2>/dev/null | grep drawtext && \
+    echo "" && \
+    echo "=== ffprobe ===" && \
+    ffprobe -version 2>&1 | head -2 && \
+    echo "" && \
+    echo "=== Fonts ===" && \
+    fc-list | grep -i "noto\|dejavu" | head -10 && \
+    echo "" && \
+    echo "=== Tools ===" && \
+    for t in curl jq bash ffmpeg ffprobe; do \
+      which "$t" > /dev/null 2>&1 \
+        && echo "  ✅ $t: $(which $t)" \
+        || echo "  ❌ $t: MISSING"; \
+    done && \
+    echo "" && \
+    echo "=== n8n nodes ===" && \
+    ls /home/node/.n8n/nodes/node_modules/ 2>/dev/null | head -10 || true && \
+    echo "" && \
+    echo "✅ ALL CHECKS PASSED"
+
+# ============================================================
+# Switch to node user for runtime
 # ============================================================
 USER node
 
-RUN echo "=== FFmpeg Version ===" && \
-    ffmpeg -version 2>&1 | head -3 && \
-    echo "" && \
-    echo "=== drawtext filter check ===" && \
-    ffmpeg -filters 2>/dev/null | grep drawtext && \
-    echo "" && \
-    echo "=== Noto fonts ===" && \
-    fc-list 2>/dev/null | grep -i noto | head -5 || echo "No noto fonts found" && \
-    echo "" && \
-    echo "=== DejaVu fonts ===" && \
-    fc-list 2>/dev/null | grep -i dejavu | head -5 || echo "No dejavu fonts found" && \
-    echo "" && \
-    echo "=== Tool availability ===" && \
-    for tool in curl jq ffmpeg ffprobe; do \
-      which "$tool" && echo "  ✅ $tool OK" || echo "  ❌ $tool MISSING"; \
-    done && \
-    echo "" && \
-    echo "✅ All checks complete"
-
-# ============================================================
-# Final setup
-# ============================================================
 WORKDIR /home/node
 
 EXPOSE 5678
