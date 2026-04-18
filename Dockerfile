@@ -13,10 +13,10 @@ RUN apk add --no-cache \
       bash \
       ca-certificates
 
-# Only copy tools that are MISSING from n8n busybox base
+# Only copy tools MISSING from n8n busybox base
 # NEVER copy: mkdir chmod rm ls cp mv cat date sleep touch
 # find grep sed awk tr cut head tail sort wc xargs basename expr
-# Those exist in busybox and copying coreutils versions BREAKS them
+# Those exist in busybox - copying coreutils versions BREAKS them
 RUN mkdir -p /toolbox && \
     for cmd in curl jq sqlite3 gzip split sha256sum; do \
       p="$(which "$cmd" 2>/dev/null)" && \
@@ -28,11 +28,11 @@ RUN mkdir -p /toolbox && \
     echo "--- toolbox ---" && \
     ls -la /toolbox/
 
-# Download static FFmpeg (best compatibility - no library deps)
+# Download static FFmpeg (no library deps - works on any Alpine)
 RUN echo "⬇️  Downloading static FFmpeg..." && \
     curl -L \
       --retry 5 \
-      --retry-delay 3 \
+      --retry-delay 5 \
       --connect-timeout 30 \
       --max-time 300 \
       -o /tmp/ffmpeg.tar.xz \
@@ -42,19 +42,19 @@ RUN echo "⬇️  Downloading static FFmpeg..." && \
     cp /tmp/ffmpeg-*-static/ffprobe /toolbox/ffprobe && \
     chmod +x /toolbox/ffmpeg /toolbox/ffprobe && \
     rm -rf /tmp/ffmpeg-*-static /tmp/ffmpeg.tar.xz && \
-    echo "✅ FFmpeg static OK" && \
+    echo "✅ Static FFmpeg ready" && \
     /toolbox/ffmpeg -version 2>&1 | head -2
 
 # ============================================================
-# Stage 2: n8n 1.88.0
+# Stage 2: n8n 2.6.2
 # ============================================================
-FROM docker.n8n.io/n8nio/n8n:1.88.0
+FROM docker.n8n.io/n8nio/n8n:2.6.2
 
 USER root
 
 # ============================================================
 # System packages
-# Install via apk - safe, no binary conflicts with busybox
+# Install via apk only - safe, no busybox conflicts
 # ============================================================
 RUN apk update && \
     apk add --no-cache \
@@ -82,9 +82,10 @@ RUN apk update && \
     rm -rf /var/cache/apk/*
 
 # ============================================================
-# Copy toolbox (safe tools only - no system binary conflicts)
+# Copy toolbox (ONLY safe tools - no system binary conflicts)
 # ============================================================
 COPY --from=tools /toolbox/ /usr/local/bin/
+
 RUN chmod +x \
       /usr/local/bin/ffmpeg \
       /usr/local/bin/ffprobe \
@@ -94,16 +95,17 @@ RUN chmod +x \
       /usr/local/bin/gzip \
       /usr/local/bin/split \
       /usr/local/bin/sha256sum && \
-    echo "✅ toolbox permissions set"
+    echo "✅ Toolbox permissions OK"
 
 # ============================================================
-# FFmpeg symlinks (cover all paths n8n nodes might check)
+# FFmpeg symlinks
+# Cover all paths n8n nodes might look for ffmpeg
 # ============================================================
 RUN ln -sf /usr/local/bin/ffmpeg  /usr/bin/ffmpeg  && \
     ln -sf /usr/local/bin/ffprobe /usr/bin/ffprobe && \
     ln -sf /usr/local/bin/ffmpeg  /bin/ffmpeg      && \
     ln -sf /usr/local/bin/ffprobe /bin/ffprobe     && \
-    echo "✅ FFmpeg symlinks created"
+    echo "✅ FFmpeg symlinks OK"
 
 # ============================================================
 # Environment
@@ -160,7 +162,7 @@ ENV EXECUTIONS_TIMEOUT_MAX="7200"
 
 # ============================================================
 # Directories + permissions
-# Use full /bin/ paths - avoids any PATH confusion
+# Use full /bin/ paths to avoid any PATH confusion
 # ============================================================
 RUN /bin/mkdir -p \
       /tmp/ffmpeg-temp \
@@ -185,7 +187,7 @@ RUN /bin/mkdir -p \
     echo "✅ Directories OK"
 
 # ============================================================
-# Custom font
+# Custom font download
 # ============================================================
 RUN /usr/local/bin/curl -fsSL \
       --retry 5 \
@@ -198,9 +200,56 @@ RUN /usr/local/bin/curl -fsSL \
     && echo "✅ Custom font downloaded" \
     || echo "⚠️  Custom font skipped - not critical"
 
-# Rebuild font cache
-RUN fc-cache -fv && \
-    echo "✅ Font cache OK"
+RUN fc-cache -fv && echo "✅ Font cache OK"
+
+# ============================================================
+# n8n 2.6.2 schema fix
+# This version uses old role table - patch it for compatibility
+# ============================================================
+RUN cat > /usr/local/bin/fix-n8n-schema.sh << 'SCHEMA_FIX'
+#!/bin/sh
+DB="$1"
+[ -z "$DB" ] && DB="/home/node/.n8n/database.sqlite"
+[ ! -f "$DB" ] && echo "No DB found" && exit 0
+
+echo "Checking n8n 2.6.2 schema..."
+
+# Check user table exists
+has_user=$(sqlite3 "$DB" \
+  "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='user';" \
+  2>/dev/null || echo "0")
+
+[ "$has_user" = "0" ] && echo "Fresh DB - OK" && exit 0
+
+# Check role column
+has_role=$(sqlite3 "$DB" \
+  "SELECT count(*) FROM pragma_table_info('user') WHERE name='role';" \
+  2>/dev/null || echo "0")
+
+if [ "$has_role" = "0" ]; then
+  echo "Adding User.role column for n8n 2.6.2..."
+  sqlite3 "$DB" "
+    BEGIN TRANSACTION;
+    ALTER TABLE user ADD COLUMN role TEXT NOT NULL DEFAULT 'global:member';
+    UPDATE user SET role = 'global:owner'
+      WHERE id = (SELECT MIN(id) FROM user);
+    UPDATE user SET role = 'global:member' WHERE role IS NULL;
+    COMMIT;
+  " 2>/dev/null && echo "Schema fixed OK" || echo "Schema fix failed"
+else
+  echo "Schema OK - role column exists"
+fi
+
+# Check globalRole table (n8n 2.x uses this)
+has_global=$(sqlite3 "$DB" \
+  "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='global_role';" \
+  2>/dev/null || echo "0")
+
+echo "global_role table: $has_global"
+SCHEMA_FIX
+
+RUN chmod +x /usr/local/bin/fix-n8n-schema.sh && \
+    echo "✅ Schema fix script OK"
 
 # ============================================================
 # Custom n8n community nodes
@@ -216,7 +265,7 @@ RUN cd /home/node/.n8n/nodes && \
       @mookielianhd/n8n-nodes-instagram \
     2>&1 | tail -3 \
     && echo "✅ Community nodes installed" \
-    || echo "⚠️  Community nodes skipped - N8N_REINSTALL_MISSING_PACKAGES will handle"
+    || echo "⚠️  Will reinstall at runtime"
 
 USER root
 
@@ -236,13 +285,13 @@ RUN find /scripts -name "*.sh" | while read -r f; do \
 # ============================================================
 RUN echo "" && \
     echo "==========================================" && \
-    echo " BUILD VERIFICATION" && \
+    echo " BUILD VERIFICATION - n8n 2.6.2" && \
     echo "==========================================" && \
     echo "" && \
-    echo "--- n8n ---" && \
+    echo "--- n8n version ---" && \
     n8n --version && \
     echo "" && \
-    echo "--- FFmpeg (static) ---" && \
+    echo "--- FFmpeg static ---" && \
     /usr/local/bin/ffmpeg -version 2>&1 | head -3 && \
     echo "" && \
     echo "--- ffprobe ---" && \
@@ -257,13 +306,13 @@ RUN echo "" && \
     echo "--- Arabic fonts ---" && \
     fc-list :lang=ar 2>/dev/null | head -5 || echo "no arabic fonts" && \
     echo "" && \
-    echo "--- All fonts (noto+dejavu) ---" && \
+    echo "--- Noto + DejaVu fonts ---" && \
     fc-list | grep -i "noto\|dejavu" | head -5 && \
     echo "" && \
     echo "--- FFmpeg symlinks ---" && \
     ls -la /usr/bin/ffmpeg /usr/bin/ffprobe /bin/ffmpeg /bin/ffprobe && \
     echo "" && \
-    echo "--- All tools ---" && \
+    echo "--- All required tools ---" && \
     for t in ffmpeg ffprobe sqlite3 curl jq bash tini su-exec; do \
       which "$t" > /dev/null 2>&1 \
         && echo "  ✅ $t -> $(which $t)" \
@@ -278,11 +327,11 @@ RUN echo "" && \
     ls -la /scripts/ && \
     echo "" && \
     echo "==========================================" && \
-    echo " ✅ ALL CHECKS PASSED - READY FOR RENDER" && \
+    echo " ✅ ALL CHECKS PASSED" && \
     echo "=========================================="
 
 # ============================================================
-# Switch to node user for runtime
+# Runtime
 # ============================================================
 USER node
 WORKDIR /home/node
