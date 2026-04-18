@@ -4,6 +4,10 @@ services:
     runtime: docker
     dockerfilePath: ./Dockerfile
     plan: free
+    region: oregon
+    autoDeploy: true
+    healthCheckPath: /healthz
+
     envVars:
       - key: TG_BOT_TOKEN
         sync: false
@@ -36,11 +40,15 @@ services:
         value: "5678"
       - key: PORT
         value: "5678"
+      - key: N8N_HOST
+        value: "0.0.0.0"
       - key: N8N_PROTOCOL
         value: "https"
-      - key: N8N_HOST
-        sync: false
+      - key: N8N_SECURE_COOKIE
+        value: "false"
       - key: WEBHOOK_URL
+        sync: false
+      - key: N8N_EDITOR_BASE_URL
         sync: false
       - key: N8N_ENCRYPTION_KEY
         sync: false
@@ -50,15 +58,49 @@ services:
         sync: false
       - key: N8N_BASIC_AUTH_PASSWORD
         sync: false
+
       - key: GENERIC_TIMEZONE
+        value: "Asia/Baghdad"
+      - key: TZ
         value: "Asia/Baghdad"
       - key: N8N_DIAGNOSTICS_ENABLED
         value: "false"
+      - key: N8N_VERSION_NOTIFICATIONS_ENABLED
+        value: "false"
+      - key: N8N_TEMPLATES_ENABLED
+        value: "true"
+      - key: N8N_SKIP_WEBHOOK_DEREGISTRATION_SHUTDOWN
+        value: "true"
+      - key: N8N_GRACEFUL_SHUTDOWN_TIMEOUT
+        value: "30"
+
       - key: N8N_DEFAULT_BINARY_DATA_MODE
         value: "filesystem"
       - key: N8N_BINARY_DATA_TTL
         value: "1"
+
       - key: N8N_RUNNERS_ENABLED
         value: "false"
       - key: EXECUTIONS_PROCESS
         value: "main"
+      - key: EXECUTIONS_TIMEOUT
+        value: "3600"
+      - key: EXECUTIONS_TIMEOUT_MAX
+        value: "7200"
+
+      - key: N8N_REINSTALL_MISSING_PACKAGES
+        value: "true"
+      - key: N8N_COMMUNITY_PACKAGES_ENABLED
+        value: "true"
+      - key: NODE_FUNCTION_ALLOW_EXTERNAL
+        value: "*"
+      - key: N8N_CUSTOM_EXTENSIONS
+        value: "/home/node/.n8n/nodes"
+
+      - key: NODE_OPTIONS
+        value: "--max-old-space-size=512"
+
+      - key: LANG
+        value: "en_US.UTF-8"
+      - key: LC_ALL
+        value: "en_US.UTF-8"
