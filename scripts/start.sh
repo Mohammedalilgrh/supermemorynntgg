@@ -13,7 +13,7 @@ export N8N_PORT
 export HOME="/home/node"
 
 # ══════════════════════════════════════════════
-# Ensure directories exist
+# Ensure directories exist (Render ephemeral fs)
 # ══════════════════════════════════════════════
 mkdir -p \
   "$N8N_DIR" \
@@ -46,121 +46,123 @@ tg_msg() {
 
 echo ""
 echo "╔══════════════════════════════════════════════╗"
-echo "║   n8n + Telegram Backup  - Starting           ║"
+echo "║   n8n 2.6.2 + Telegram Backup - Starting      ║"
 echo "╚══════════════════════════════════════════════╝"
 echo ""
 echo "📡 Port      : $N8N_PORT"
 echo "🗄️  DB        : $N8N_DIR/database.sqlite"
 echo "🌍 Timezone  : ${TZ:-UTC}"
-echo "🎬 FFmpeg    : $(ffmpeg -version 2>&1 | head -1)"
+echo "🎬 FFmpeg    : $(/usr/local/bin/ffmpeg -version 2>&1 | head -1)"
 echo ""
 
 # ══════════════════════════════════════════════
-# DB Schema checker + auto-fix
-# Fixes: SQLITE_ERROR: no such column: User.role
+# Community nodes check + reinstall if missing
+# ══════════════════════════════════════════════
+ensure_community_nodes() {
+  echo "📦 Checking community nodes..."
+
+  mkdir -p "$N8N_DIR/nodes"
+  cd "$N8N_DIR/nodes"
+
+  if [ ! -f "package.json" ]; then
+    echo "  Creating package.json..."
+    npm init -y > /dev/null 2>&1 || true
+  fi
+
+  # Add all your community nodes here
+  for pkg in "@mookielianhd/n8n-nodes-instagram"; do
+    if [ ! -d "node_modules/$pkg" ]; then
+      echo "  📥 Installing: $pkg"
+      npm install \
+        --save \
+        --no-audit \
+        --no-fund \
+        "$pkg" \
+        > /dev/null 2>&1 \
+      && echo "  ✅ $pkg" \
+      || echo "  ⚠️  $pkg failed"
+    else
+      echo "  ✅ $pkg present"
+    fi
+  done
+
+  cd "$HOME"
+  echo "✅ Community nodes OK"
+}
+
+ensure_community_nodes
+
+# ══════════════════════════════════════════════
+# DB Schema fix for n8n 2.6.2
 # ══════════════════════════════════════════════
 fix_db_schema() {
   local db="$1"
+  echo "🔧 Checking DB schema (n8n 2.6.2)..."
 
-  echo "🔧 Checking database schema..."
-
-  # Check if user table exists at all
+  # Check user table exists
   local has_user
   has_user=$(sqlite3 "$db" \
     "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='user';" \
     2>/dev/null || echo "0")
 
   if [ "$has_user" = "0" ]; then
-    echo "ℹ️  No user table found - fresh DB, skipping schema fix"
+    echo "ℹ️  Fresh DB - no schema fix needed"
     return 0
   fi
 
-  # Check if role column exists in user table
+  # Check role column in user table
   local has_role
   has_role=$(sqlite3 "$db" \
     "SELECT count(*) FROM pragma_table_info('user') WHERE name='role';" \
     2>/dev/null || echo "0")
 
   if [ "$has_role" = "0" ]; then
-    echo "⚠️  Missing User.role column - applying schema migration..."
-
+    echo "⚠️  Missing User.role - fixing for n8n 2.6.2..."
     sqlite3 "$db" "
       BEGIN TRANSACTION;
-
-      -- Add role column to user table
       ALTER TABLE user ADD COLUMN role TEXT NOT NULL DEFAULT 'global:member';
-
-      -- Set first user (lowest id) as global owner
-      UPDATE user
-        SET role = 'global:owner'
+      UPDATE user SET role = 'global:owner'
         WHERE id = (SELECT MIN(id) FROM user);
-
-      -- Fix any nulls just in case
       UPDATE user SET role = 'global:member' WHERE role IS NULL;
-
       COMMIT;
-    " 2>/dev/null && \
-      echo "✅ User.role column added successfully" || \
-      echo "⚠️  Schema migration failed - will try fresh DB"
-
-    # Verify fix worked
-    has_role=$(sqlite3 "$db" \
-      "SELECT count(*) FROM pragma_table_info('user') WHERE name='role';" \
-      2>/dev/null || echo "0")
-
-    if [ "$has_role" = "0" ]; then
-      echo "❌ Schema fix failed - backing up broken DB and starting fresh"
+    " 2>/dev/null \
+    && echo "✅ User.role fixed" \
+    || {
+      echo "❌ Schema fix failed - backing up and starting fresh"
       mv "$db" "${db}.broken.$(date +%s)" 2>/dev/null || true
       return 1
-    fi
-
-    echo "✅ Schema verified OK"
+    }
   else
-    echo "✅ User.role column exists - schema OK"
+    echo "✅ User.role exists - schema OK"
   fi
 
-  # Check globalRole table (older n8n versions used this)
-  local has_global_role_table
-  has_global_role_table=$(sqlite3 "$db" \
-    "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='role';" \
-    2>/dev/null || echo "0")
-
-  if [ "$has_global_role_table" = "1" ]; then
-    echo "ℹ️  Old 'role' table found - checking for migration conflicts..."
-    # n8n will handle this migration itself - just log it
-    sqlite3 "$db" \
-      "SELECT name, scope FROM role LIMIT 5;" \
-      2>/dev/null || true
-  fi
-
-  return 0
+  # Log table summary
+  echo "📊 Tables: $(sqlite3 "$db" \
+    "SELECT count(*) FROM sqlite_master WHERE type='table';" \
+    2>/dev/null || echo '?')"
 }
 
 # ══════════════════════════════════════════════
 # Restore from Telegram backup
 # ══════════════════════════════════════════════
 if [ ! -s "$N8N_DIR/database.sqlite" ]; then
-  echo "📦 No database found - attempting restore..."
-  if [ -f /scripts/restore.sh ]; then
+  echo "📦 No database - attempting restore..."
+  [ -f /scripts/restore.sh ] && \
     sh /scripts/restore.sh 2>&1 || true
-  fi
 
   if [ -s "$N8N_DIR/database.sqlite" ]; then
     _tc=$(sqlite3 "$N8N_DIR/database.sqlite" \
       "SELECT count(*) FROM sqlite_master WHERE type='table';" \
       2>/dev/null || echo 0)
-    echo "✅ Restored! ($_tc tables found)"
-
-    # Fix schema after restore
+    echo "✅ Restored! ($_tc tables)"
     fix_db_schema "$N8N_DIR/database.sqlite"
   else
     echo "🆕 Fresh start - no backup found"
   fi
 else
-  _sz=$(du -h "$N8N_DIR/database.sqlite" 2>/dev/null | cut -f1 || echo "?")
+  _sz=$(du -h "$N8N_DIR/database.sqlite" \
+    2>/dev/null | cut -f1 || echo "?")
   echo "✅ Database exists ($_sz)"
-
-  # Always check and fix schema on existing DB
   fix_db_schema "$N8N_DIR/database.sqlite"
 fi
 
@@ -172,27 +174,27 @@ mkdir -p "$N8N_DIR/binaryData"
 echo "🧹 binaryData cleaned"
 
 # ══════════════════════════════════════════════
-# Clean old execution records on startup
+# Clean old execution records
 # ══════════════════════════════════════════════
 if [ -s "$N8N_DIR/database.sqlite" ]; then
-  echo "🗄️  Cleaning old execution records..."
-  _before=$(du -h "$N8N_DIR/database.sqlite" 2>/dev/null | cut -f1 || echo "?")
-
+  echo "🗄️  Cleaning old executions..."
+  _before=$(du -h "$N8N_DIR/database.sqlite" \
+    2>/dev/null | cut -f1 || echo "?")
   sqlite3 "$N8N_DIR/database.sqlite" "
     DELETE FROM execution_entity WHERE finished = 1;
     DELETE FROM execution_data
       WHERE executionId NOT IN (SELECT id FROM execution_entity);
     VACUUM;
   " 2>/dev/null || true
-
-  _after=$(du -h "$N8N_DIR/database.sqlite" 2>/dev/null | cut -f1 || echo "?")
-  echo "✅ DB cleaned: $_before → $_after"
+  _after=$(du -h "$N8N_DIR/database.sqlite" \
+    2>/dev/null | cut -f1 || echo "?")
+  echo "✅ DB: $_before → $_after"
 fi
 
 echo ""
 
 # ══════════════════════════════════════════════
-# Background: wait for n8n → notify + bot + backup
+# Background: wait → notify + bot + backup
 # ══════════════════════════════════════════════
 (
   echo "[bg] Waiting for n8n to be ready..."
@@ -201,7 +203,7 @@ echo ""
     if curl -sf --max-time 3 \
         "http://localhost:${N8N_PORT}/healthz" \
         > /dev/null 2>&1; then
-      echo "[bg] ✅ n8n is ready"
+      echo "[bg] ✅ n8n ready after ${_waited}s"
       break
     fi
     sleep 5
@@ -210,50 +212,63 @@ echo ""
 
   if [ "$_waited" -ge 180 ]; then
     echo "[bg] ⚠️  n8n did not respond after 180s"
-    tg_msg "⚠️ <b>n8n startup timeout!</b> Check logs."
+    tg_msg "⚠️ <b>n8n startup timeout!</b>%0ACheck Render logs."
   else
-    tg_msg "🚀 <b>n8n is running!</b>%0ASend /start to control backups."
+    tg_msg "🚀 <b>n8n 2.6.2 is running!</b>%0ASend /start to control backups."
   fi
 
-  # Start bot
+  # Start Telegram bot
   if [ -f /scripts/bot.sh ]; then
     sh /scripts/bot.sh 2>&1 | sed 's/^/[bot] /' &
-    echo "[bg] Bot started"
+    echo "[bg] ✅ Bot started"
   else
     echo "[bg] ⚠️  bot.sh not found"
   fi
 
   # Initial backup
   sleep 30
-  if [ -s "$N8N_DIR/database.sqlite" ] && [ -f /scripts/backup.sh ]; then
+  if [ -s "$N8N_DIR/database.sqlite" ] && \
+     [ -f /scripts/backup.sh ]; then
     rm -f "$WORK/.backup_state"
     sh /scripts/backup.sh 2>&1 | sed 's/^/[backup] /' || true
   fi
 
-  # Periodic backup
+  # Periodic backup loop
   while true; do
     sleep "$MONITOR_INTERVAL"
-    if [ -s "$N8N_DIR/database.sqlite" ] && [ -f /scripts/backup.sh ]; then
+    if [ -s "$N8N_DIR/database.sqlite" ] && \
+       [ -f /scripts/backup.sh ]; then
       sh /scripts/backup.sh 2>&1 | sed 's/^/[backup] /' || true
     fi
   done
 ) &
 
 # ══════════════════════════════════════════════
-# Background: Keep-alive
+# Keep-alive ping (prevents Render free tier sleep)
+# Pings every 4m50s to beat Render 15min timeout
+# This keeps Schedule Trigger working 24/7
 # ══════════════════════════════════════════════
 (
-  sleep 60
+  sleep 90
+  echo "[keepalive] Starting - ping every 290s"
+
   while true; do
-    curl -sf --max-time 5 \
+    _status=$(curl -sf --max-time 10 \
       "http://localhost:${N8N_PORT}/healthz" \
-      > /dev/null 2>&1 || true
-    sleep 240
+      2>/dev/null && echo "ok" || echo "fail")
+
+    echo "[keepalive] $(date '+%H:%M:%S') → $_status"
+
+    if [ "$_status" = "fail" ]; then
+      tg_msg "⚠️ <b>n8n health check failed!</b>%0AScheduled tasks may be stopped."
+    fi
+
+    sleep 290
   done
 ) &
 
 # ══════════════════════════════════════════════
-# Background: Clean binaryData every 10 min
+# Clean binaryData every 10 minutes
 # ══════════════════════════════════════════════
 (
   sleep 600
@@ -271,7 +286,7 @@ echo ""
 ) &
 
 # ══════════════════════════════════════════════
-# Background: Clean DB records hourly
+# Clean DB execution records hourly
 # ══════════════════════════════════════════════
 (
   sleep 3600
@@ -290,7 +305,7 @@ echo ""
 ) &
 
 # ══════════════════════════════════════════════
-# Start n8n (foreground)
+# Start n8n (foreground - keeps container alive)
 # ══════════════════════════════════════════════
-echo "🚀 Starting n8n on port $N8N_PORT..."
+echo "🚀 Starting n8n 2.6.2 on port $N8N_PORT..."
 exec n8n start
