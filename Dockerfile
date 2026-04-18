@@ -48,7 +48,7 @@ RUN echo "⬇️  Downloading static FFmpeg..." && \
 # ============================================================
 # Stage 2: n8n 1.88.0
 # ============================================================
-FROM docker.n8n.io/n8nio/n8n:1.88.0
+FROM docker.n8n.io/n8nio/n8n:latest
 
 USER root
 
