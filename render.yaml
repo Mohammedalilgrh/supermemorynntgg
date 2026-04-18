@@ -4,7 +4,15 @@ services:
     runtime: docker
     dockerfilePath: ./Dockerfile
     plan: free
+    region: oregon
+
+    # Render free tier: restart on crash
+    autoDeploy: true
+
+    healthCheckPath: /healthz
+
     envVars:
+      # ── Telegram ──────────────────────────────
       - key: TG_BOT_TOKEN
         sync: false
       - key: TG_CHAT_ID
@@ -12,6 +20,7 @@ services:
       - key: TG_ADMIN_ID
         sync: false
 
+      # ── Backup timing ─────────────────────────
       - key: MONITOR_INTERVAL
         value: "300"
       - key: MIN_BACKUP_INTERVAL_SEC
@@ -21,6 +30,51 @@ services:
       - key: CHUNK_SIZE
         value: "18M"
 
+      # ── n8n network ───────────────────────────
+      - key: PORT
+        value: "5678"
+      - key: N8N_PORT
+        value: "5678"
+      - key: N8N_HOST
+        value: "0.0.0.0"
+      - key: N8N_PROTOCOL
+        value: "https"
+      - key: N8N_SECURE_COOKIE
+        value: "false"
+      - key: WEBHOOK_URL
+        sync: false
+      - key: N8N_EDITOR_BASE_URL
+        sync: false
+
+      # ── n8n auth ──────────────────────────────
+      - key: N8N_BASIC_AUTH_ACTIVE
+        value: "true"
+      - key: N8N_BASIC_AUTH_USER
+        sync: false
+      - key: N8N_BASIC_AUTH_PASSWORD
+        sync: false
+      - key: N8N_ENCRYPTION_KEY
+        sync: false
+
+      # ── n8n behavior ──────────────────────────
+      - key: GENERIC_TIMEZONE
+        value: "Asia/Baghdad"
+      - key: TZ
+        value: "Asia/Baghdad"
+      - key: N8N_DIAGNOSTICS_ENABLED
+        value: "false"
+      - key: N8N_VERSION_NOTIFICATIONS_ENABLED
+        value: "false"
+      - key: N8N_TEMPLATES_ENABLED
+        value: "true"
+
+      # ── Binary data ───────────────────────────
+      - key: N8N_DEFAULT_BINARY_DATA_MODE
+        value: "filesystem"
+      - key: N8N_BINARY_DATA_TTL
+        value: "1"
+
+      # ── Execution pruning ─────────────────────
       - key: EXECUTIONS_DATA_PRUNE
         value: "true"
       - key: EXECUTIONS_DATA_MAX_AGE
@@ -32,33 +86,16 @@ services:
       - key: EXECUTIONS_DATA_SAVE_MANUAL_EXECUTIONS
         value: "false"
 
-      - key: N8N_PORT
-        value: "5678"
-      - key: PORT
-        value: "5678"
-      - key: N8N_PROTOCOL
-        value: "https"
-      - key: N8N_HOST
-        sync: false
-      - key: WEBHOOK_URL
-        sync: false
-      - key: N8N_ENCRYPTION_KEY
-        sync: false
-      - key: N8N_BASIC_AUTH_ACTIVE
-        value: "true"
-      - key: N8N_BASIC_AUTH_USER
-        sync: false
-      - key: N8N_BASIC_AUTH_PASSWORD
-        sync: false
-      - key: GENERIC_TIMEZONE
-        value: "Asia/Baghdad"
-      - key: N8N_DIAGNOSTICS_ENABLED
-        value: "false"
-      - key: N8N_DEFAULT_BINARY_DATA_MODE
-        value: "filesystem"
-      - key: N8N_BINARY_DATA_TTL
-        value: "1"
-      - key: N8N_RUNNERS_ENABLED
-        value: "false"
+      # ── Execution process ─────────────────────
       - key: EXECUTIONS_PROCESS
         value: "main"
+
+      # ── Memory ────────────────────────────────
+      - key: NODE_OPTIONS
+        value: "--max-old-space-size=512"
+
+      # ── Custom nodes ──────────────────────────
+      - key: NODE_FUNCTION_ALLOW_EXTERNAL
+        value: "*"
+      - key: N8N_CUSTOM_EXTENSIONS
+        value: "/home/node/.n8n/nodes"
