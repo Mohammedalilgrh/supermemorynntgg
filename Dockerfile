@@ -53,8 +53,7 @@ FROM docker.n8n.io/n8nio/n8n:2.6.2
 USER root
 
 # ============================================================
-# System packages
-# Install via apk only - safe, no busybox conflicts
+# System packages - apk only, no busybox conflicts
 # ============================================================
 RUN apk update && \
     apk add --no-cache \
@@ -62,7 +61,6 @@ RUN apk update && \
       ttf-dejavu \
       font-noto \
       font-noto-arabic \
-      font-noto-extra \
       libass \
       freetype \
       harfbuzz \
@@ -81,8 +79,12 @@ RUN apk update && \
       expat && \
     rm -rf /var/cache/apk/*
 
+# font-noto-extra may not exist in this Alpine version - try separately
+RUN apk add --no-cache font-noto-extra 2>/dev/null || \
+    echo "⚠️  font-noto-extra not available - skipping"
+
 # ============================================================
-# Copy toolbox (ONLY safe tools - no system binary conflicts)
+# Copy toolbox (safe tools only)
 # ============================================================
 COPY --from=tools /toolbox/ /usr/local/bin/
 
@@ -98,8 +100,7 @@ RUN chmod +x \
     echo "✅ Toolbox permissions OK"
 
 # ============================================================
-# FFmpeg symlinks
-# Cover all paths n8n nodes might look for ffmpeg
+# FFmpeg symlinks - cover all paths n8n nodes check
 # ============================================================
 RUN ln -sf /usr/local/bin/ffmpeg  /usr/bin/ffmpeg  && \
     ln -sf /usr/local/bin/ffprobe /usr/bin/ffprobe && \
@@ -162,7 +163,7 @@ ENV EXECUTIONS_TIMEOUT_MAX="7200"
 
 # ============================================================
 # Directories + permissions
-# Use full /bin/ paths to avoid any PATH confusion
+# Use full /bin/ paths - avoids PATH confusion
 # ============================================================
 RUN /bin/mkdir -p \
       /tmp/ffmpeg-temp \
@@ -187,7 +188,7 @@ RUN /bin/mkdir -p \
     echo "✅ Directories OK"
 
 # ============================================================
-# Custom font download
+# Custom font
 # ============================================================
 RUN /usr/local/bin/curl -fsSL \
       --retry 5 \
@@ -198,61 +199,12 @@ RUN /usr/local/bin/curl -fsSL \
       "https://pub-4685bf7139084a5f95b995d22d06af3f.r2.dev/DejaVuSerif-Bold.ttf" \
     && /bin/chmod 644 /usr/share/fonts/custom/DejaVuSerif-Bold.ttf \
     && echo "✅ Custom font downloaded" \
-    || echo "⚠️  Custom font skipped - not critical"
+    || echo "⚠️  Custom font skipped"
 
 RUN fc-cache -fv && echo "✅ Font cache OK"
 
 # ============================================================
-# n8n 2.6.2 schema fix
-# This version uses old role table - patch it for compatibility
-# ============================================================
-RUN cat > /usr/local/bin/fix-n8n-schema.sh << 'SCHEMA_FIX'
-#!/bin/sh
-DB="$1"
-[ -z "$DB" ] && DB="/home/node/.n8n/database.sqlite"
-[ ! -f "$DB" ] && echo "No DB found" && exit 0
-
-echo "Checking n8n 2.6.2 schema..."
-
-# Check user table exists
-has_user=$(sqlite3 "$DB" \
-  "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='user';" \
-  2>/dev/null || echo "0")
-
-[ "$has_user" = "0" ] && echo "Fresh DB - OK" && exit 0
-
-# Check role column
-has_role=$(sqlite3 "$DB" \
-  "SELECT count(*) FROM pragma_table_info('user') WHERE name='role';" \
-  2>/dev/null || echo "0")
-
-if [ "$has_role" = "0" ]; then
-  echo "Adding User.role column for n8n 2.6.2..."
-  sqlite3 "$DB" "
-    BEGIN TRANSACTION;
-    ALTER TABLE user ADD COLUMN role TEXT NOT NULL DEFAULT 'global:member';
-    UPDATE user SET role = 'global:owner'
-      WHERE id = (SELECT MIN(id) FROM user);
-    UPDATE user SET role = 'global:member' WHERE role IS NULL;
-    COMMIT;
-  " 2>/dev/null && echo "Schema fixed OK" || echo "Schema fix failed"
-else
-  echo "Schema OK - role column exists"
-fi
-
-# Check globalRole table (n8n 2.x uses this)
-has_global=$(sqlite3 "$DB" \
-  "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='global_role';" \
-  2>/dev/null || echo "0")
-
-echo "global_role table: $has_global"
-SCHEMA_FIX
-
-RUN chmod +x /usr/local/bin/fix-n8n-schema.sh && \
-    echo "✅ Schema fix script OK"
-
-# ============================================================
-# Custom n8n community nodes
+# Community nodes
 # ============================================================
 USER node
 
@@ -264,7 +216,7 @@ RUN cd /home/node/.n8n/nodes && \
       --no-fund \
       @mookielianhd/n8n-nodes-instagram \
     2>&1 | tail -3 \
-    && echo "✅ Community nodes installed" \
+    && echo "✅ Community nodes OK" \
     || echo "⚠️  Will reinstall at runtime"
 
 USER root
@@ -277,7 +229,7 @@ COPY --chown=node:node scripts/ /scripts/
 RUN find /scripts -name "*.sh" | while read -r f; do \
       sed -i 's/\r$//' "$f" && \
       /bin/chmod 0755 "$f" && \
-      echo "✅ $f ready"; \
+      echo "✅ $f"; \
     done
 
 # ============================================================
@@ -285,49 +237,52 @@ RUN find /scripts -name "*.sh" | while read -r f; do \
 # ============================================================
 RUN echo "" && \
     echo "==========================================" && \
-    echo " BUILD VERIFICATION - n8n 2.6.2" && \
+    echo " BUILD VERIFICATION - n8n 2.6.2"          && \
     echo "==========================================" && \
-    echo "" && \
-    echo "--- n8n version ---" && \
-    n8n --version && \
-    echo "" && \
-    echo "--- FFmpeg static ---" && \
-    /usr/local/bin/ffmpeg -version 2>&1 | head -3 && \
-    echo "" && \
-    echo "--- ffprobe ---" && \
-    /usr/local/bin/ffprobe -version 2>&1 | head -1 && \
-    echo "" && \
-    echo "--- drawtext filter ---" && \
-    /usr/local/bin/ffmpeg -filters 2>/dev/null | grep drawtext && \
-    echo "" && \
-    echo "--- sqlite3 ---" && \
-    sqlite3 --version && \
-    echo "" && \
-    echo "--- Arabic fonts ---" && \
-    fc-list :lang=ar 2>/dev/null | head -5 || echo "no arabic fonts" && \
-    echo "" && \
-    echo "--- Noto + DejaVu fonts ---" && \
-    fc-list | grep -i "noto\|dejavu" | head -5 && \
-    echo "" && \
-    echo "--- FFmpeg symlinks ---" && \
-    ls -la /usr/bin/ffmpeg /usr/bin/ffprobe /bin/ffmpeg /bin/ffprobe && \
-    echo "" && \
-    echo "--- All required tools ---" && \
-    for t in ffmpeg ffprobe sqlite3 curl jq bash tini su-exec; do \
-      which "$t" > /dev/null 2>&1 \
-        && echo "  ✅ $t -> $(which $t)" \
-        || echo "  ❌ $t MISSING"; \
-    done && \
-    echo "" && \
-    echo "--- Community nodes ---" && \
-    ls /home/node/.n8n/nodes/node_modules/ 2>/dev/null | head -10 || \
-    echo "  none pre-installed" && \
-    echo "" && \
-    echo "--- Scripts ---" && \
-    ls -la /scripts/ && \
-    echo "" && \
+    echo ""                                          && \
+    echo "--- n8n ---"                               && \
+    n8n --version                                    && \
+    echo ""                                          && \
+    echo "--- FFmpeg static ---"                     && \
+    /usr/local/bin/ffmpeg -version 2>&1 | head -2   && \
+    echo ""                                          && \
+    echo "--- ffprobe ---"                           && \
+    /usr/local/bin/ffprobe -version 2>&1 | head -1  && \
+    echo ""                                          && \
+    echo "--- drawtext ---"                          && \
+    /usr/local/bin/ffmpeg -filters 2>/dev/null \
+      | grep drawtext                                && \
+    echo ""                                          && \
+    echo "--- sqlite3 ---"                           && \
+    sqlite3 --version                                && \
+    echo ""                                          && \
+    echo "--- fonts ---"                             && \
+    fc-list | grep -i "noto\|dejavu" | head -5      && \
+    echo ""                                          && \
+    echo "--- arabic fonts ---"                      && \
+    fc-list :lang=ar 2>/dev/null | head -3           \
+      || echo "no arabic"                            && \
+    echo ""                                          && \
+    echo "--- symlinks ---"                          && \
+    ls -la /usr/bin/ffmpeg /bin/ffmpeg               && \
+    echo ""                                          && \
+    echo "--- all tools ---"                         && \
+    for t in ffmpeg ffprobe sqlite3 curl \
+              jq bash tini su-exec; do \
+      which "$t" > /dev/null 2>&1                   \
+        && echo "  ✅ $t -> $(which $t)"             \
+        || echo "  ❌ $t MISSING";                   \
+    done                                             && \
+    echo ""                                          && \
+    echo "--- nodes ---"                             && \
+    ls /home/node/.n8n/nodes/node_modules/ \
+      2>/dev/null | head -5 || echo "none"           && \
+    echo ""                                          && \
+    echo "--- scripts ---"                           && \
+    ls -la /scripts/                                 && \
+    echo ""                                          && \
     echo "==========================================" && \
-    echo " ✅ ALL CHECKS PASSED" && \
+    echo " ✅ ALL CHECKS PASSED"                     && \
     echo "=========================================="
 
 # ============================================================
