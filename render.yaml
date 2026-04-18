@@ -5,10 +5,7 @@ services:
     dockerfilePath: ./Dockerfile
     plan: free
     region: oregon
-
-    # Render free tier: restart on crash
     autoDeploy: true
-
     healthCheckPath: /healthz
 
     envVars:
@@ -67,6 +64,20 @@ services:
         value: "false"
       - key: N8N_TEMPLATES_ENABLED
         value: "true"
+      - key: N8N_SKIP_WEBHOOK_DEREGISTRATION_SHUTDOWN
+        value: "true"
+      - key: N8N_GRACEFUL_SHUTDOWN_TIMEOUT
+        value: "30"
+
+      # ── Community nodes ───────────────────────
+      - key: N8N_REINSTALL_MISSING_PACKAGES
+        value: "true"
+      - key: N8N_COMMUNITY_PACKAGES_ENABLED
+        value: "true"
+      - key: NODE_FUNCTION_ALLOW_EXTERNAL
+        value: "*"
+      - key: N8N_CUSTOM_EXTENSIONS
+        value: "/home/node/.n8n/nodes"
 
       # ── Binary data ───────────────────────────
       - key: N8N_DEFAULT_BINARY_DATA_MODE
@@ -89,13 +100,11 @@ services:
       # ── Execution process ─────────────────────
       - key: EXECUTIONS_PROCESS
         value: "main"
+      - key: EXECUTIONS_TIMEOUT
+        value: "3600"
+      - key: EXECUTIONS_TIMEOUT_MAX
+        value: "7200"
 
       # ── Memory ────────────────────────────────
       - key: NODE_OPTIONS
         value: "--max-old-space-size=512"
-
-      # ── Custom nodes ──────────────────────────
-      - key: NODE_FUNCTION_ALLOW_EXTERNAL
-        value: "*"
-      - key: N8N_CUSTOM_EXTENSIONS
-        value: "/home/node/.n8n/nodes"
