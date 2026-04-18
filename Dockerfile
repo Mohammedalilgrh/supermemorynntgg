@@ -27,7 +27,7 @@ RUN mkdir -p /toolbox && \
 # ============================================================
 # Stage 2: n8n + FFmpeg
 # ============================================================
-FROM docker.n8n.io/n8nio/n8n:1.30.1
+FROM docker.n8n.io/n8nio/n8n:1.88.0
 
 USER root
 
