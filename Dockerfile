@@ -1,5 +1,5 @@
 # ============================================================
-# Stage 1: toolbox (ONLY tools missing from n8n base image)
+# Stage 1: toolbox (ONLY missing tools - NOT system binaries)
 # ============================================================
 FROM alpine:3.19 AS tools
 
@@ -7,48 +7,32 @@ RUN apk add --no-cache \
       curl \
       jq \
       sqlite \
-      tar \
       gzip \
       xz \
       coreutils \
-      findutils \
       bash \
       ca-certificates
 
-# IMPORTANT: Only copy tools that do NOT exist in n8n base image
-# Do NOT copy: mkdir, rm, ls, cp, mv, cat, date, sleep, touch,
-#              chmod, chown, stat, find, grep, sed, awk, tr,
-#              cut, head, tail, sort, wc, xargs, basename, expr
-# These all exist in busybox inside the n8n image already
+# Only copy tools truly missing from n8n busybox base
 RUN mkdir -p /toolbox && \
     for cmd in curl jq sqlite3 gzip split sha256sum; do \
       p="$(which "$cmd" 2>/dev/null)" && \
       [ -f "$p" ] && \
       cp "$p" /toolbox/ && \
-      echo "✅ copied: $cmd -> $p" || \
+      echo "✅ $cmd" || \
       echo "⚠️  skip: $cmd"; \
     done && \
-    echo "--- toolbox contents ---" && \
     ls -la /toolbox/
-
-# Copy shared libraries needed by sqlite3
-RUN mkdir -p /toolbox-libs && \
-    for bin in /toolbox/sqlite3 /toolbox/curl /toolbox/jq; do \
-      [ -f "$bin" ] && \
-      ldd "$bin" 2>/dev/null | grep -o '/[^ ]*\.so[^ ]*' | while read -r lib; do \
-        [ -f "$lib" ] && cp -n "$lib" /toolbox-libs/ && echo "lib: $lib" || true; \
-      done || true; \
-    done
 
 # ============================================================
 # Stage 2: n8n + FFmpeg
 # ============================================================
-FROM docker.n8n.io/n8nio/n8n:1.88.0
+FROM docker.n8n.io/n8nio/n8n:1.30.1
 
 USER root
 
 # ============================================================
-# System packages - use n8n base apk (do NOT override system bins)
+# System packages
 # ============================================================
 RUN apk update && \
     apk add --no-cache \
@@ -70,12 +54,6 @@ RUN apk update && \
       su-exec \
       tzdata && \
     rm -rf /var/cache/apk/*
-
-# ============================================================
-# Copy ONLY the non-conflicting toolbox binaries
-# sqlite3 from apk is already installed above so skip toolbox copy
-# We install everything via apk - toolbox stage is now just a safety net
-# ============================================================
 
 # ============================================================
 # Environment
@@ -108,8 +86,7 @@ ENV EXECUTIONS_DATA_SAVE_MANUAL_EXECUTIONS="false"
 ENV EXECUTIONS_PROCESS="main"
 
 # ============================================================
-# Directories + permissions
-# Use /bin/mkdir explicitly to avoid any PATH confusion
+# Directories + permissions (use full paths - no toolbox conflict)
 # ============================================================
 RUN /bin/mkdir -p \
       /tmp/ffmpeg-temp \
@@ -144,12 +121,12 @@ RUN /usr/bin/curl -fsSL \
       "https://pub-4685bf7139084a5f95b995d22d06af3f.r2.dev/DejaVuSerif-Bold.ttf" \
     && /bin/chmod 644 /usr/share/fonts/custom/DejaVuSerif-Bold.ttf \
     && echo "✅ Font downloaded" \
-    || echo "⚠️  Font skipped - not critical"
+    || echo "⚠️  Font skipped"
 
 RUN fc-cache -fv && echo "✅ Font cache OK"
 
 # ============================================================
-# Custom n8n nodes (as node user)
+# Custom n8n nodes
 # ============================================================
 USER node
 
@@ -174,54 +151,25 @@ COPY --chown=node:node scripts/ /scripts/
 RUN find /scripts -name "*.sh" | while read -r f; do \
       sed -i 's/\r$//' "$f" && \
       /bin/chmod 0755 "$f" && \
-      echo "✅ ready: $f"; \
+      echo "✅ $f"; \
     done
 
 # ============================================================
-# Build verification
+# Verification
 # ============================================================
-RUN echo "" && \
-    echo "==================================" && \
-    echo " BUILD VERIFICATION" && \
-    echo "==================================" && \
-    echo "" && \
-    echo "--- System tools ---" && \
-    which mkdir && mkdir --version 2>/dev/null | head -1 || true && \
-    echo "" && \
-    echo "--- FFmpeg ---" && \
+RUN echo "=== FFmpeg ===" && \
     /usr/bin/ffmpeg -version 2>&1 | head -2 && \
-    echo "" && \
-    echo "--- ffprobe ---" && \
-    /usr/bin/ffprobe -version 2>&1 | head -1 && \
-    echo "" && \
-    echo "--- drawtext ---" && \
+    echo "=== drawtext ===" && \
     /usr/bin/ffmpeg -filters 2>/dev/null | grep drawtext && \
-    echo "" && \
-    echo "--- sqlite3 ---" && \
+    echo "=== sqlite3 ===" && \
     /usr/bin/sqlite3 --version && \
-    echo "" && \
-    echo "--- curl ---" && \
-    /usr/bin/curl --version | head -1 && \
-    echo "" && \
-    echo "--- jq ---" && \
-    /usr/bin/jq --version && \
-    echo "" && \
-    echo "--- fonts ---" && \
-    fc-list | grep -i "noto\|dejavu" | head -5 && \
-    echo "" && \
-    echo "--- all required tools ---" && \
+    echo "=== tools ===" && \
     for t in ffmpeg ffprobe sqlite3 curl jq bash tini su-exec; do \
       which "$t" > /dev/null 2>&1 \
         && echo "  ✅ $t -> $(which $t)" \
         || echo "  ❌ $t MISSING"; \
     done && \
-    echo "" && \
-    echo "--- scripts ---" && \
-    ls -la /scripts/ && \
-    echo "" && \
-    echo "==================================" && \
-    echo " ✅ ALL CHECKS PASSED" && \
-    echo "==================================="
+    echo "✅ BUILD OK"
 
 # ============================================================
 # Runtime
