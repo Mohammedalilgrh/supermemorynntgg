@@ -25,10 +25,9 @@ RUN mkdir -p /toolbox && \
       echo "✅ $cmd" || \
       echo "⚠️  skip: $cmd"; \
     done && \
-    echo "--- toolbox ---" && \
     ls -la /toolbox/
 
-# Download static FFmpeg
+# Download static FFmpeg (no library deps)
 RUN echo "⬇️  Downloading static FFmpeg..." && \
     curl -L \
       --retry 5 \
@@ -53,7 +52,7 @@ FROM docker.n8n.io/n8nio/n8n:2.6.2
 USER root
 
 # ============================================================
-# System packages
+# System packages - apk only, no busybox conflicts
 # ============================================================
 RUN apk update && \
     apk add --no-cache \
@@ -81,16 +80,16 @@ RUN apk update && \
       unzip && \
     rm -rf /var/cache/apk/*
 
-# Optional packages - may not exist in all Alpine versions
+# Optional font packages
 RUN apk add --no-cache \
       font-noto-extra \
       font-noto-emoji \
       font-freefont \
       2>/dev/null || \
-    echo "⚠️  Some optional font packages skipped"
+    echo "⚠️  Some optional fonts skipped"
 
 # ============================================================
-# Copy toolbox (safe tools only - no busybox conflicts)
+# Copy toolbox (safe - no busybox conflicts)
 # ============================================================
 COPY --from=tools /toolbox/ /usr/local/bin/
 
@@ -103,16 +102,16 @@ RUN chmod +x \
       /usr/local/bin/gzip \
       /usr/local/bin/split \
       /usr/local/bin/sha256sum && \
-    echo "✅ Toolbox permissions OK"
+    echo "✅ Toolbox OK"
 
 # ============================================================
-# FFmpeg symlinks - cover all paths n8n nodes check
+# FFmpeg symlinks
 # ============================================================
 RUN ln -sf /usr/local/bin/ffmpeg  /usr/bin/ffmpeg  && \
     ln -sf /usr/local/bin/ffprobe /usr/bin/ffprobe && \
     ln -sf /usr/local/bin/ffmpeg  /bin/ffmpeg      && \
     ln -sf /usr/local/bin/ffprobe /bin/ffprobe     && \
-    echo "✅ FFmpeg symlinks OK"
+    echo "✅ Symlinks OK"
 
 # ============================================================
 # Environment
@@ -154,6 +153,7 @@ ENV N8N_VERSION_NOTIFICATIONS_ENABLED="false"
 ENV N8N_TEMPLATES_ENABLED="true"
 ENV N8N_SKIP_WEBHOOK_DEREGISTRATION_SHUTDOWN="true"
 ENV N8N_GRACEFUL_SHUTDOWN_TIMEOUT="30"
+ENV N8N_RUNNERS_ENABLED="false"
 
 # Database
 ENV DB_TYPE="sqlite"
@@ -175,7 +175,6 @@ ENV EXECUTIONS_TIMEOUT_MAX="7200"
 
 # ============================================================
 # Directories + permissions
-# Use full /bin/ paths - avoids PATH confusion
 # ============================================================
 RUN /bin/mkdir -p \
       /tmp/ffmpeg-temp \
@@ -206,51 +205,42 @@ RUN /bin/mkdir -p \
     echo "✅ Directories OK"
 
 # ============================================================
-# Download Arabic fonts (Amiri) + Noto Color Emoji
+# Download Arabic fonts (Amiri)
 # ============================================================
-RUN echo "⬇️  Downloading Amiri Arabic font..." && \
-    curl -fsSL \
-      --retry 3 \
-      --retry-delay 3 \
-      --connect-timeout 15 \
-      --max-time 60 \
+RUN curl -fsSL \
+      --retry 3 --retry-delay 3 \
+      --connect-timeout 15 --max-time 60 \
       "https://github.com/aliftype/amiri/releases/download/1.000/Amiri-1.000.zip" \
       -o /tmp/amiri.zip \
     && unzip -q /tmp/amiri.zip -d /tmp/amiri \
     && find /tmp/amiri -name "*.ttf" \
          -exec cp {} /usr/share/fonts/amiri/ \; \
     && rm -rf /tmp/amiri /tmp/amiri.zip \
-    && echo "✅ Amiri font installed" \
-    || echo "⚠️  Amiri font skipped"
+    && echo "✅ Amiri font OK" \
+    || echo "⚠️  Amiri skipped"
 
-RUN echo "⬇️  Downloading Noto Color Emoji..." && \
-    curl -fsSL \
-      --retry 3 \
-      --retry-delay 3 \
-      --connect-timeout 15 \
-      --max-time 60 \
+# Download Noto Color Emoji
+RUN curl -fsSL \
+      --retry 3 --retry-delay 3 \
+      --connect-timeout 15 --max-time 60 \
       "https://github.com/googlefonts/noto-emoji/raw/main/fonts/NotoColorEmoji.ttf" \
       -o /usr/share/fonts/noto-emoji/NotoColorEmoji.ttf \
-    && echo "✅ NotoColorEmoji installed" \
+    && echo "✅ NotoColorEmoji OK" \
     || echo "⚠️  NotoColorEmoji skipped"
 
-# ============================================================
-# Custom DejaVuSerif-Bold font
-# ============================================================
-RUN /usr/local/bin/curl -fsSL \
-      --retry 5 \
-      --retry-delay 3 \
-      --retry-max-time 60 \
-      --connect-timeout 15 \
+# Custom DejaVuSerif-Bold
+RUN curl -fsSL \
+      --retry 5 --retry-delay 3 \
+      --retry-max-time 60 --connect-timeout 15 \
       -o /usr/share/fonts/custom/DejaVuSerif-Bold.ttf \
       "https://pub-4685bf7139084a5f95b995d22d06af3f.r2.dev/DejaVuSerif-Bold.ttf" \
     && /bin/chmod 644 \
          /usr/share/fonts/custom/DejaVuSerif-Bold.ttf \
-    && echo "✅ DejaVuSerif-Bold downloaded" \
+    && echo "✅ DejaVuSerif-Bold OK" \
     || echo "⚠️  DejaVuSerif-Bold skipped"
 
 # ============================================================
-# Fontconfig - Arabic + Emoji priority config
+# Fontconfig - Arabic + Emoji priority
 # ============================================================
 RUN cat > /etc/fonts/conf.d/10-arabic-emoji.conf << 'EOF'
 <?xml version="1.0"?>
@@ -283,16 +273,16 @@ RUN cat > /etc/fonts/conf.d/10-arabic-emoji.conf << 'EOF'
     </prefer>
   </alias>
   <match target="font">
-    <edit name="antialias"  mode="assign">
+    <edit name="antialias" mode="assign">
       <bool>true</bool>
     </edit>
-    <edit name="hinting"    mode="assign">
+    <edit name="hinting" mode="assign">
       <bool>true</bool>
     </edit>
-    <edit name="hintstyle"  mode="assign">
+    <edit name="hintstyle" mode="assign">
       <const>hintslight</const>
     </edit>
-    <edit name="rgba"       mode="assign">
+    <edit name="rgba" mode="assign">
       <const>rgb</const>
     </edit>
   </match>
@@ -303,22 +293,11 @@ EOF
 
 RUN fc-cache -fv && \
     echo "✅ Font cache OK" && \
-    echo "=== Arabic fonts ===" && \
-    fc-list :lang=ar | sort | head -10 || \
-    echo "no arabic fonts" && \
-    echo "=== All noto+dejavu ===" && \
-    fc-list | grep -i "noto\|dejavu\|amiri" \
-      | head -10 || true
-
-# ============================================================
-# Verify FFmpeg works
-# ============================================================
-RUN echo "=== FFmpeg verify ===" && \
-    /usr/local/bin/ffmpeg -version 2>&1 | head -3 && \
-    /usr/local/bin/ffprobe -version 2>&1 | head -1 && \
-    /usr/local/bin/ffmpeg -filters 2>/dev/null \
-      | grep drawtext && \
-    echo "✅ FFmpeg + drawtext OK"
+    echo "=== Arabic ===" && \
+    fc-list :lang=ar | head -5 || true && \
+    echo "=== Noto+DejaVu+Amiri ===" && \
+    fc-list | grep -i "amiri\|noto\|dejavu" \
+      | head -8 || true
 
 # ============================================================
 # Community nodes
@@ -356,70 +335,41 @@ RUN echo "" && \
     echo "==========================================" && \
     echo " BUILD VERIFICATION - n8n 2.6.2"          && \
     echo "==========================================" && \
-    echo ""                                          && \
     echo "--- n8n ---"                               && \
     n8n --version                                    && \
-    echo ""                                          && \
-    echo "--- FFmpeg static ---"                     && \
+    echo "--- FFmpeg ---"                            && \
     /usr/local/bin/ffmpeg -version 2>&1 | head -2   && \
-    echo ""                                          && \
     echo "--- ffprobe ---"                           && \
     /usr/local/bin/ffprobe -version 2>&1 | head -1  && \
-    echo ""                                          && \
-    echo "--- drawtext filter ---"                   && \
+    echo "--- drawtext ---"                          && \
     /usr/local/bin/ffmpeg -filters 2>/dev/null \
       | grep drawtext                                && \
-    echo ""                                          && \
     echo "--- sqlite3 ---"                           && \
     sqlite3 --version                                && \
-    echo ""                                          && \
-    echo "--- Arabic fonts ---"                      && \
-    fc-list :lang=ar 2>/dev/null | head -5           \
-      || echo "no arabic"                            && \
-    echo ""                                          && \
-    echo "--- Amiri + Noto + DejaVu ---"             && \
-    fc-list | grep -i "amiri\|noto\|dejavu"          \
-      | head -8 || true                              && \
-    echo ""                                          && \
-    echo "--- FFmpeg symlinks ---"                   && \
-    ls -la /usr/bin/ffmpeg                           \
-           /usr/bin/ffprobe                          \
-           /bin/ffmpeg                               \
-           /bin/ffprobe                              && \
-    echo ""                                          && \
-    echo "--- All tools ---"                         && \
+    echo "--- symlinks ---"                          && \
+    ls -la /usr/bin/ffmpeg /bin/ffmpeg               && \
+    echo "--- tools ---"                             && \
     for t in ffmpeg ffprobe sqlite3 curl \
               jq bash tini su-exec; do \
-      which "$t" > /dev/null 2>&1                   \
-        && echo "  ✅ $t -> $(which $t)"             \
-        || echo "  ❌ $t MISSING";                   \
+      which "$t" > /dev/null 2>&1 \
+        && echo "  ✅ $t -> $(which $t)" \
+        || echo "  ❌ $t MISSING"; \
     done                                             && \
-    echo ""                                          && \
-    echo "--- Community nodes ---"                   && \
-    ls /home/node/.n8n/nodes/node_modules/           \
-      2>/dev/null | head -5 || echo "none"           && \
-    echo ""                                          && \
-    echo "--- Scripts ---"                           && \
+    echo "--- scripts ---"                           && \
     ls -la /scripts/                                 && \
-    echo ""                                          && \
-    echo "==========================================" && \
+    echo "=========================================" && \
     echo " ✅ ALL CHECKS PASSED"                     && \
-    echo "=========================================="
+    echo "========================================="
 
-# ============================================================
-# Final verification as node user
-# ============================================================
+# Final check as node user
 USER node
 
 RUN ffmpeg -version 2>&1 | head -1 && \
     ffprobe -version 2>&1 | head -1 && \
     fc-list :lang=ar 2>/dev/null | head -3 \
       || echo "Arabic fonts check done" && \
-    echo "✅ FFmpeg verified as node user"
+    echo "✅ Verified as node user"
 
-# ============================================================
-# Runtime
-# ============================================================
 WORKDIR /home/node
 EXPOSE 5678
 
