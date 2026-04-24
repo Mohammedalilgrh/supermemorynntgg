@@ -1,0 +1,13 @@
+[Script Info]
+ScriptType: v4.00+
+PlayResX:1080
+PlayResY:1920
+
+[V4+ Styles]
+Format:Name,Fontname,Fontsize,PrimaryColour,Bold,Spacing,OutlineColour,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV
+Style:Default,Playfair Display,67,&H00F8F8F8,3,4,&H00000000,1,0,4,2,120,120,500
+
+[Events]
+Format: Layer,Start,End,Style,Text
+Dialogue: 0,0:00:00.00,0:00:04.00,Default,Gram for gram bones are stronger than steel
+Dialogue: 0,0:00:04.00,0:00:08.00,Default,You are born with 300 bones but end up with 206
