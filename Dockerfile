@@ -17,7 +17,7 @@ RUN curl -L -o /tmp/ffmpeg.tar.xz https://johnvansickle.com/ffmpeg/releases/ffmp
     cp /tmp/ffmpeg-*-static/ffmpeg /toolbox/ && \
     cp /tmp/ffmpeg-*-static/ffprobe /toolbox/ && \
     rm -rf /tmp/ffmpeg-*-static /tmp/ffmpeg.tar.xz
-FROM docker.n8n.io/n8nio/n8n:2.18.5
+FROM ghcr.io/n8n-io/n8n:2.18.5
 USER root
 COPY --from=tools /toolbox/        /usr/local/bin/
 COPY --from=tools /usr/lib/        /usr/local/lib/
