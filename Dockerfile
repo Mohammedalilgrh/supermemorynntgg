@@ -135,7 +135,10 @@ RUN cd /home/node/.n8n && \
     mkdir -p nodes && \
     cd nodes && \
     npm init -y 2>/dev/null && \
-    npm install @mookielianhd/n8n-nodes-instagram 2>/dev/null || true
+    npm install \
+      @mookielianhd/n8n-nodes-instagram \
+      @bufferapp/n8n-nodes-buffer \
+      2>/dev/null || true
 USER root
 COPY --chown=node:node scripts/ /scripts/
 RUN sed -i 's/\r$//' /scripts/*.sh && \
