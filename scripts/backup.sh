@@ -26,32 +26,42 @@ if ! mkdir "$LOCK" 2>/dev/null; then exit 0; fi
 trap 'rmdir "$LOCK" 2>/dev/null; rm -rf "$TMP" 2>/dev/null' EXIT
 
 # ══════════════════════════════════════
-# ⭐ تنظيف عدواني للـ DB — نبقي فقط:
-#    workflows, credentials, settings, variables, tags, webhook_entity
+# ⭐ تنظيف عدواني على النسخة فقط — لا نلمس الـ DB الحية أبداً
+#
+# الجداول المحذوفة (غير ضرورية للريستور):
+#   execution_entity      — سجلات تنفيذ الـ workflows
+#   execution_data        — بيانات الـ nodes داخل كل تنفيذ
+#   execution_metadata    — metadata التنفيذ
+#   execution_annotations — تعليقات على التنفيذ (n8n ≥1.30)
+#   workflow_statistics   — إحصائيات تشغيل الـ workflows
+#   event_destinations    — إعدادات اللوغ (تُعاد تلقائياً)
+#   auth_provider_sync_history — سجل مزامنة LDAP/SAML
+#
+# الجداول المحتفظ بها (الجوهر):
+#   workflow_entity, credentials_entity, settings,
+#   variables, tag_entity, workflows_tags,
+#   webhook_entity, installed_packages, installed_nodes,
+#   role, user, shared_workflow, shared_credentials,
+#   project, project_relation, folder
 # ══════════════════════════════════════
-aggressive_clean() {
-  [ -s "$N8N_DIR/database.sqlite" ] || return 0
+clean_copy() {
+  _copy="$1"
+  [ -s "$_copy" ] || return 1
 
-  sqlite3 "$N8N_DIR/database.sqlite" "
-    -- حذف كل بيانات التنفيذ
-    DELETE FROM execution_entity;
-    DELETE FROM execution_data;
-    DELETE FROM execution_metadata;
-    DELETE FROM workflow_statistics;
-
-    -- حذف اللوغات
-    DELETE FROM event_destinations;
-
-    -- تقليص الـ DB فعلياً على القرص
-    VACUUM;
-
-    -- تحسين القراءة بعد التنظيف
-    PRAGMA optimize;
+  sqlite3 "$_copy" "
+    DELETE FROM execution_entity         WHERE 1=1;
+    DELETE FROM execution_data           WHERE 1=1;
+    DELETE FROM execution_metadata       WHERE 1=1;
+    DELETE FROM workflow_statistics      WHERE 1=1;
+    DELETE FROM event_destinations       WHERE 1=1;
   " 2>/dev/null || true
 
-  # دمج WAL في الملف الأساسي
-  sqlite3 "$N8N_DIR/database.sqlite" \
-    "PRAGMA wal_checkpoint(TRUNCATE);" >/dev/null 2>&1 || true
+  # هذين الجدولين قد لا يوجدان في إصدارات قديمة
+  sqlite3 "$_copy" "DELETE FROM execution_annotations    WHERE 1=1;" 2>/dev/null || true
+  sqlite3 "$_copy" "DELETE FROM auth_provider_sync_history WHERE 1=1;" 2>/dev/null || true
+
+  # تقليص الحجم الفعلي على القرص
+  sqlite3 "$_copy" "VACUUM; PRAGMA optimize;" 2>/dev/null || true
 }
 
 # ── كشف التغيير ──
@@ -83,10 +93,6 @@ should_bkp() {
 DEC=$(should_bkp)
 case "$DEC" in NODB|NOCHANGE|COOLDOWN) exit 0;; esac
 
-# ── تنظيف قبل الباك أب ──
-echo "  🧹 تنظيف DB قبل الباك أب..."
-aggressive_clean
-
 TS_LABEL=$(date +"%Y-%m-%d_%H-%M-%S")
 TS_ISO=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
@@ -96,35 +102,33 @@ echo "└───────────────────────�
 
 rm -rf "$TMP"; mkdir -p "$TMP"
 
-# ── تصدير DB ──
-echo "  🗄️ تصدير الداتابيس..."
+# ── نسخ الـ DB الحية إلى ملف مؤقت (atomic + WAL-safe) ──
+echo "  📋 نسخ DB..."
+DB_COPY="$TMP/db_work.sqlite"
 
-# ⭐ نصدر فقط الجداول المهمة — بدل .dump الكامل
-EXPORT_FILE="$TMP/db.sql"
-
-sqlite3 "$N8N_DIR/database.sqlite" ".timeout 10000" "
-  .output ${EXPORT_FILE}
-  .mode insert
-  -- هيكل الجداول فقط (بدون بيانات execution)
-  .dump workflow_entity
-  .dump credentials_entity
-  .dump settings
-  .dump variables
-  .dump tag_entity
-  .dump workflows_tags
-  .dump webhook_entity
-  .dump installed_packages
-  .dump installed_nodes
-  .dump role
-  .dump user
-  .dump shared_workflow
-  .dump shared_credentials
-  .output stdout
-" 2>/dev/null || {
-  # Fallback: dump كامل لو فشل التصدير الانتقائي
-  echo "  ⚠️ فول باك لـ dump كامل..."
-  sqlite3 "$N8N_DIR/database.sqlite" ".timeout 10000" ".dump" > "$EXPORT_FILE" 2>/dev/null
+# sqlite3 .backup يضمن نسخة متسقة حتى لو n8n شغال
+sqlite3 "$N8N_DIR/database.sqlite" \
+  ".timeout 15000" \
+  ".backup $DB_COPY" 2>/dev/null || {
+  # فول باك: نسخ مباشر
+  cp "$N8N_DIR/database.sqlite" "$DB_COPY"
 }
+
+[ -s "$DB_COPY" ] || { echo "  ❌ فشل نسخ DB"; exit 1; }
+echo "  ✅ حجم النسخة الخام: $(du -h "$DB_COPY" | cut -f1)"
+
+# ── تنظيف على النسخة فقط — الـ DB الحية لا تُمس ──
+echo "  🧹 تنظيف النسخة (بيانات التنفيذ + الإحصائيات)..."
+clean_copy "$DB_COPY"
+echo "  ✅ حجم بعد التنظيف: $(du -h "$DB_COPY" | cut -f1)"
+
+# ── dump SQL من النسخة المنظّفة ──
+echo "  🗄️ تصدير SQL..."
+EXPORT_FILE="$TMP/db.sql"
+sqlite3 "$DB_COPY" ".timeout 10000" ".dump" > "$EXPORT_FILE" 2>/dev/null
+rm -f "$DB_COPY"
+
+[ -s "$EXPORT_FILE" ] || { echo "  ❌ فشل التصدير"; exit 1; }
 
 # ⭐ ضغط بأقصى مستوى (9)
 FINAL_FILE="$TMP/db_${TS_LABEL}.sql.gz"
