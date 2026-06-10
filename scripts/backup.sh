@@ -10,9 +10,8 @@ WORK="${WORK:-/backup-data}"
 
 MIN_INT="${MIN_BACKUP_INTERVAL_SEC:-600}"
 FORCE_INT="${FORCE_BACKUP_EVERY_SEC:-21600}"
-GZIP_LVL="${GZIP_LEVEL:-1}"
-CHUNK="${CHUNK_SIZE:-18M}"
-CHUNK_BYTES=18874368
+# ⭐ رفعنا الضغط لأقصى مستوى (9) لتصغير الملف قدر الإمكان
+GZIP_LVL="${GZIP_LEVEL:-9}"
 
 STATE="$WORK/.backup_state"
 LOCK="$WORK/.backup_lock"
@@ -27,19 +26,32 @@ if ! mkdir "$LOCK" 2>/dev/null; then exit 0; fi
 trap 'rmdir "$LOCK" 2>/dev/null; rm -rf "$TMP" 2>/dev/null' EXIT
 
 # ══════════════════════════════════════
-# ⭐ تنظيف عدواني للـ DB قبل أي شيء
-# نحذف كل شيء ما عدا: workflows, credentials, settings
+# ⭐ تنظيف عدواني للـ DB — نبقي فقط:
+#    workflows, credentials, settings, variables, tags, webhook_entity
 # ══════════════════════════════════════
 aggressive_clean() {
   [ -s "$N8N_DIR/database.sqlite" ] || return 0
-  
+
   sqlite3 "$N8N_DIR/database.sqlite" "
+    -- حذف كل بيانات التنفيذ
     DELETE FROM execution_entity;
     DELETE FROM execution_data;
     DELETE FROM execution_metadata;
     DELETE FROM workflow_statistics;
+
+    -- حذف اللوغات
+    DELETE FROM event_destinations;
+
+    -- تقليص الـ DB فعلياً على القرص
     VACUUM;
+
+    -- تحسين القراءة بعد التنظيف
+    PRAGMA optimize;
   " 2>/dev/null || true
+
+  # دمج WAL في الملف الأساسي
+  sqlite3 "$N8N_DIR/database.sqlite" \
+    "PRAGMA wal_checkpoint(TRUNCATE);" >/dev/null 2>&1 || true
 }
 
 # ── كشف التغيير ──
@@ -82,109 +94,100 @@ echo "┌───────────────────────�
 echo "│ 📦 باك أب: $TS_LABEL ($DEC)"
 echo "└─────────────────────────────────────┘"
 
-rm -rf "$TMP"; mkdir -p "$TMP/parts"
+rm -rf "$TMP"; mkdir -p "$TMP"
 
 # ── تصدير DB ──
 echo "  🗄️ تصدير الداتابيس..."
-sqlite3 "$N8N_DIR/database.sqlite" ".timeout 10000" \
-  "PRAGMA wal_checkpoint(TRUNCATE);" >/dev/null 2>&1 || true
 
-sqlite3 "$N8N_DIR/database.sqlite" ".timeout 10000" ".dump" 2>/dev/null \
-  | gzip -n -"$GZIP_LVL" -c > "$TMP/db.sql.gz"
+# ⭐ نصدر فقط الجداول المهمة — بدل .dump الكامل
+EXPORT_FILE="$TMP/db.sql"
 
-[ -s "$TMP/db.sql.gz" ] || { echo "  ❌ فشل التصدير"; exit 1; }
-DB_SIZE=$(du -h "$TMP/db.sql.gz" | cut -f1)
-echo "  ✅ DB: $DB_SIZE"
+sqlite3 "$N8N_DIR/database.sqlite" ".timeout 10000" "
+  .output ${EXPORT_FILE}
+  .mode insert
+  -- هيكل الجداول فقط (بدون بيانات execution)
+  .dump workflow_entity
+  .dump credentials_entity
+  .dump settings
+  .dump variables
+  .dump tag_entity
+  .dump workflows_tags
+  .dump webhook_entity
+  .dump installed_packages
+  .dump installed_nodes
+  .dump role
+  .dump user
+  .dump shared_workflow
+  .dump shared_credentials
+  .output stdout
+" 2>/dev/null || {
+  # Fallback: dump كامل لو فشل التصدير الانتقائي
+  echo "  ⚠️ فول باك لـ dump كامل..."
+  sqlite3 "$N8N_DIR/database.sqlite" ".timeout 10000" ".dump" > "$EXPORT_FILE" 2>/dev/null
+}
 
-# ── تحقق من الحجم — لو أكبر من 18MB في مشكلة ──
-_db_bytes=$(stat -c '%s' "$TMP/db.sql.gz" 2>/dev/null || echo 0)
+# ⭐ ضغط بأقصى مستوى (9)
+FINAL_FILE="$TMP/db_${TS_LABEL}.sql.gz"
+gzip -n -9 -c "$EXPORT_FILE" > "$FINAL_FILE"
+rm -f "$EXPORT_FILE"
+
+[ -s "$FINAL_FILE" ] || { echo "  ❌ فشل التصدير"; exit 1; }
+
+DB_SIZE=$(du -h "$FINAL_FILE" | cut -f1)
+_db_bytes=$(stat -c '%s' "$FINAL_FILE" 2>/dev/null || echo 0)
+echo "  ✅ DB: $DB_SIZE ($DEC)"
+
+# ── تحقق من الحجم — لو لا زال أكبر من 18MB نوقف ونبلغ ──
+CHUNK_BYTES=18874368
 if [ "$_db_bytes" -gt "$CHUNK_BYTES" ]; then
-  echo "  ⚠️ الملف كبير جداً ($_db_bytes bytes) — تقسيم..."
-  split -b "$CHUNK" -d -a 3 "$TMP/db.sql.gz" "$TMP/parts/db.sql.gz.part_"
-  rm -f "$TMP/db.sql.gz"
-  TOTAL_PARTS=$(ls "$TMP/parts/" | wc -l | tr -d ' ')
-  echo "  ✂️ تم التقسيم لـ $TOTAL_PARTS أجزاء"
-else
-  mv "$TMP/db.sql.gz" "$TMP/parts/db.sql.gz"
-  TOTAL_PARTS=1
+  echo "  ❌ الملف لا زال كبيراً جداً ($_db_bytes bytes) بعد التنظيف والضغط!"
+  curl -sS -X POST "${TG}/sendMessage" \
+    -d "chat_id=${TG_CHAT_ID}" \
+    -d "text=⚠️ #n8n_backup_error%0A❌ الملف تجاوز 18MB بعد التنظيف والضغط%0A📊 الحجم: ${DB_SIZE}%0A🕐 ${TS_ISO}" \
+    >/dev/null 2>&1 || true
+  exit 1
 fi
 
-# ── رفع لـ Telegram ──
-echo "  📤 رفع $TOTAL_PARTS ملف..."
+# ── رفع لـ Telegram (ملف واحد دائماً) ──
+_fn=$(basename "$FINAL_FILE")
+echo "  📤 رفع $_fn ($DB_SIZE)..."
 
-FILE_COUNT=0
-UPLOAD_OK=true
-LAST_MSG_ID=""
-ALL_FILE_IDS=""
-
-for f in $(ls "$TMP/parts/" | sort); do
-  _fp="$TMP/parts/$f"
-  [ -f "$_fp" ] || continue
-  _fn=$(basename "$_fp")
-  _fs=$(du -h "$_fp" | cut -f1)
-
-  # ⭐ نضيف BACKUP_ID و TOTAL_PARTS في الكابشن
-  _caption="📦 #n8n_backup
+_caption="📦 #n8n_backup
 🆔 ${TS_LABEL}
 📄 ${_fn}
-📊 جزء $((FILE_COUNT + 1)) من ${TOTAL_PARTS}
-💾 ${_fs}"
+💾 ${DB_SIZE}
+🔍 ${DEC}"
 
-  _try=0; _ok_flag=""
-  while [ "$_try" -lt 3 ]; do
-    _resp=$(curl -sS -X POST "${TG}/sendDocument" \
-      -F "chat_id=${TG_CHAT_ID}" \
-      -F "document=@${_fp};filename=${_fn}" \
-      -F "caption=${_caption}" \
-      2>/dev/null || true)
+_try=0; LAST_MSG_ID=""
+while [ "$_try" -lt 3 ]; do
+  _resp=$(curl -sS -X POST "${TG}/sendDocument" \
+    -F "chat_id=${TG_CHAT_ID}" \
+    -F "document=@${FINAL_FILE};filename=${_fn}" \
+    -F "caption=${_caption}" \
+    2>/dev/null || true)
 
-    _rok=$(echo "$_resp" | jq -r '.ok // "false"' 2>/dev/null || true)
-    _mid=$(echo "$_resp" | jq -r '.result.message_id // empty' 2>/dev/null || true)
-    _fid=$(echo "$_resp" | jq -r '.result.document.file_id // empty' 2>/dev/null || true)
+  _rok=$(echo "$_resp" | jq -r '.ok // "false"' 2>/dev/null || true)
+  _mid=$(echo "$_resp" | jq -r '.result.message_id // empty' 2>/dev/null || true)
 
-    if [ "$_rok" = "true" ] && [ -n "$_mid" ]; then
-      _ok_flag="yes"
-      FILE_COUNT=$((FILE_COUNT + 1))
-      LAST_MSG_ID="$_mid"
-      ALL_FILE_IDS="${ALL_FILE_IDS}${_fid}:${_fn}|"
-      echo "    ✅ $_fn ($_fs) msg_id=$_mid"
-      break
-    fi
+  if [ "$_rok" = "true" ] && [ -n "$_mid" ]; then
+    LAST_MSG_ID="$_mid"
+    echo "    ✅ تم الرفع! msg_id=$_mid"
+    break
+  fi
 
-    _try=$((_try + 1))
-    sleep 3
-  done
-
-  [ -n "$_ok_flag" ] || { UPLOAD_OK=false; break; }
-  sleep 1
+  _try=$((_try + 1))
+  echo "    ⚠️ محاولة $_try فشلت، إعادة بعد 3 ثوان..."
+  sleep 3
 done
 
-[ "$UPLOAD_OK" = "true" ] || { echo "  ❌ فشل الرفع"; exit 1; }
+[ -n "$LAST_MSG_ID" ] || { echo "  ❌ فشل الرفع بعد 3 محاولات"; exit 1; }
 
-# ── إرسال رسالة manifest لو في أكثر من جزء ──
-if [ "$TOTAL_PARTS" -gt 1 ]; then
-  echo "  📋 إرسال manifest..."
-  _manifest_msg="🗂️ #n8n_manifest
-🆔 ${TS_LABEL}
-📦 أجزاء: ${TOTAL_PARTS}
-💾 الحجم: ${DB_SIZE}
-📌 أرجع للرسائل فوق لتحميل الأجزاء"
-
-  _mresp=$(curl -sS -X POST "${TG}/sendMessage" \
-    -d "chat_id=${TG_CHAT_ID}" \
-    -d "text=${_manifest_msg}" \
-    2>/dev/null || true)
-  LAST_MSG_ID=$(echo "$_mresp" | jq -r '.result.message_id // empty' 2>/dev/null || true)
-fi
-
-# ── تثبيت آخر رسالة ──
-if [ -n "$LAST_MSG_ID" ]; then
-  curl -sS -X POST "${TG}/pinChatMessage" \
-    -d "chat_id=${TG_CHAT_ID}" \
-    -d "message_id=${LAST_MSG_ID}" \
-    -d "disable_notification=true" >/dev/null 2>&1 || true
-  echo "  📌 مثبّت! (msg_id=$LAST_MSG_ID)"
-fi
+# ── تثبيت الرسالة ──
+curl -sS -X POST "${TG}/pinChatMessage" \
+  -d "chat_id=${TG_CHAT_ID}" \
+  -d "message_id=${LAST_MSG_ID}" \
+  -d "disable_notification=true" >/dev/null 2>&1 || true
+echo "  📌 مثبّت! (msg_id=$LAST_MSG_ID)"
 
 # ── حفظ الحالة ──
 cat > "$STATE" <<EOF
@@ -193,11 +196,9 @@ TS=$TS_ISO
 LE=$(date +%s)
 LF=$(date +%s)
 LD=$(db_sig)
-FC=$FILE_COUNT
 SZ=$DB_SIZE
-PARTS=$TOTAL_PARTS
 EOF
 
 rm -rf "$TMP"
-echo "  ✅ اكتمل! DB: $DB_SIZE | أجزاء: $TOTAL_PARTS"
+echo "  ✅ اكتمل! DB: $DB_SIZE"
 exit 0
